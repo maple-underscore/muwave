@@ -1,0 +1,208 @@
+"""Tests for the FSK modulation module."""
+
+import numpy as np
+import pytest
+
+from muwave.audio.fsk import FSKModulator, FSKDemodulator, FSKConfig
+
+
+class TestFSKConfig:
+    """Tests for FSKConfig."""
+    
+    def test_default_config(self):
+        """Test default configuration values."""
+        config = FSKConfig()
+        
+        assert config.sample_rate == 44100
+        assert config.base_frequency == 1000.0
+        assert config.num_frequencies == 16
+        assert config.symbol_duration_ms == 50.0
+
+
+class TestFSKModulator:
+    """Tests for FSKModulator."""
+    
+    def test_modulator_creation(self):
+        """Test creating a modulator."""
+        mod = FSKModulator()
+        
+        assert mod.config is not None
+        assert len(mod._frequencies) == 16
+    
+    def test_generate_tone(self):
+        """Test generating a tone."""
+        mod = FSKModulator()
+        
+        tone = mod._generate_tone(1000, 100)  # 1000 Hz, 100ms
+        
+        expected_samples = int(44100 * 0.1)  # 4410 samples
+        assert len(tone) == expected_samples
+        assert tone.dtype == np.float32
+        assert np.max(np.abs(tone)) <= 1.0
+    
+    def test_generate_silence(self):
+        """Test generating silence."""
+        mod = FSKModulator()
+        
+        silence = mod._generate_silence(50)  # 50ms
+        
+        expected_samples = int(44100 * 0.05)
+        assert len(silence) == expected_samples
+        assert np.all(silence == 0)
+    
+    def test_generate_start_signal(self):
+        """Test generating start signal."""
+        mod = FSKModulator()
+        
+        signal = mod.generate_start_signal()
+        
+        # Should be signal_duration_ms long
+        expected_samples = int(44100 * mod.config.signal_duration_ms / 1000)
+        assert len(signal) == expected_samples
+        assert signal.dtype == np.float32
+    
+    def test_generate_end_signal(self):
+        """Test generating end signal."""
+        mod = FSKModulator()
+        
+        signal = mod.generate_end_signal()
+        
+        expected_samples = int(44100 * mod.config.signal_duration_ms / 1000)
+        assert len(signal) == expected_samples
+    
+    def test_encode_byte(self):
+        """Test encoding a single byte."""
+        mod = FSKModulator()
+        
+        samples = mod.encode_byte(0xAB)
+        
+        # Two symbols (nibbles) per byte
+        symbol_samples = int(44100 * mod.config.symbol_duration_ms / 1000)
+        assert len(samples) == symbol_samples * 2
+    
+    def test_encode_signature(self):
+        """Test encoding a signature."""
+        mod = FSKModulator()
+        signature = b'\x01\x02\x03\x04\x05\x06\x07\x08'
+        
+        samples = mod.encode_signature(signature)
+        
+        symbol_samples = int(44100 * mod.config.symbol_duration_ms / 1000)
+        expected_samples = len(signature) * 2 * symbol_samples
+        assert len(samples) == expected_samples
+    
+    def test_encode_data(self):
+        """Test encoding data with start/end signals."""
+        mod = FSKModulator()
+        data = b"Hello"
+        
+        samples = mod.encode_data(data)
+        
+        # Should have start signal + data + end signal + silences
+        assert len(samples) > 0
+        assert samples.dtype == np.float32
+    
+    def test_encode_text(self):
+        """Test encoding text."""
+        mod = FSKModulator()
+        
+        samples = mod.encode_text("Hello, World!")
+        
+        assert len(samples) > 0
+        assert samples.dtype == np.float32
+    
+    def test_encode_with_repetitions(self):
+        """Test encoding with redundancy repetitions."""
+        mod = FSKModulator()
+        data = b"Test"
+        
+        samples_1x = mod.encode_data(data, repetitions=1)
+        samples_2x = mod.encode_data(data, repetitions=2)
+        
+        # 2x repetition should be longer
+        assert len(samples_2x) > len(samples_1x)
+    
+    def test_encode_with_signature(self):
+        """Test encoding with party signature."""
+        mod = FSKModulator()
+        data = b"Test"
+        signature = b'\x12\x34\x56\x78\x9A\xBC\xDE\xF0'
+        
+        samples_no_sig = mod.encode_data(data)
+        samples_with_sig = mod.encode_data(data, signature=signature)
+        
+        # With signature should be longer
+        assert len(samples_with_sig) > len(samples_no_sig)
+
+
+class TestFSKDemodulator:
+    """Tests for FSKDemodulator."""
+    
+    def test_demodulator_creation(self):
+        """Test creating a demodulator."""
+        demod = FSKDemodulator()
+        
+        assert demod.config is not None
+        assert len(demod._frequencies) == 16
+    
+    def test_goertzel_algorithm(self):
+        """Test Goertzel algorithm for frequency detection."""
+        demod = FSKDemodulator()
+        
+        # Generate a known frequency
+        t = np.linspace(0, 0.05, int(44100 * 0.05), endpoint=False)
+        test_freq = 1000
+        samples = np.sin(2 * np.pi * test_freq * t).astype(np.float32)
+        
+        # Goertzel should detect high magnitude at test frequency
+        magnitude = demod._goertzel(samples, test_freq)
+        magnitude_off = demod._goertzel(samples, 2000)  # Different frequency
+        
+        assert magnitude > magnitude_off
+    
+    def test_detect_frequency(self):
+        """Test frequency detection."""
+        demod = FSKDemodulator()
+        
+        # Generate tone at one of our frequencies
+        target_idx = 5
+        target_freq = demod._frequencies[target_idx]
+        
+        t = np.linspace(0, 0.05, int(44100 * 0.05), endpoint=False)
+        samples = np.sin(2 * np.pi * target_freq * t).astype(np.float32) * 0.8
+        
+        detected_idx, confidence = demod._detect_frequency(samples, demod._frequencies)
+        
+        assert detected_idx == target_idx
+        assert confidence > 0.3
+    
+    def test_encode_decode_roundtrip(self):
+        """Test that modulation/demodulation roundtrips correctly."""
+        mod = FSKModulator()
+        demod = FSKDemodulator()
+        
+        # Encode a simple message
+        original_text = "Hi"
+        samples = mod.encode_text(original_text)
+        
+        # Find start signal
+        start_found, start_pos = demod.detect_start_signal(samples)
+        assert start_found
+        
+        # Find end signal
+        end_found, end_pos = demod.detect_end_signal(samples[start_pos:])
+        assert end_found
+    
+    def test_estimate_frequency(self):
+        """Test frequency estimation using FFT."""
+        demod = FSKDemodulator()
+        
+        # Generate a known frequency
+        test_freq = 1500
+        t = np.linspace(0, 0.1, int(44100 * 0.1), endpoint=False)
+        samples = np.sin(2 * np.pi * test_freq * t).astype(np.float32)
+        
+        estimated = demod._estimate_frequency(samples)
+        
+        # Should be close to test frequency (within 50 Hz)
+        assert abs(estimated - test_freq) < 50

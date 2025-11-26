@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ party.name }} - muwave</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        .party-header {
+            border-left: 6px solid {{ color }};
+            padding-left: 20px;
+        }
+        .party-indicator {
+            background: {{ color }};
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header party-header">
+            <h1>{{ party.name }}</h1>
+            <p>Party ID: {{ party.party_id[:16] }}...</p>
+            <div class="party-badges">
+                {% if party.is_ai %}
+                <span class="badge badge-ai">🤖 AI Agent</span>
+                {% endif %}
+                <span class="badge" id="speaking-badge" style="display: none;">🔊 Speaking</span>
+                <span class="badge" id="listening-badge">👂 Listening</span>
+            </div>
+        </header>
+        
+        <nav class="nav">
+            <a href="/" class="nav-link">Dashboard</a>
+            <a href="/user" class="nav-link">User Input</a>
+            <a href="/party/{{ party.party_id }}" class="nav-link active" style="border-color: {{ color }}">
+                {{ party.name }}
+            </a>
+        </nav>
+        
+        <main class="main">
+            <div class="grid">
+                <!-- Audio Visualization -->
+                <div class="card wide">
+                    <h2>Audio Waveform</h2>
+                    <canvas id="waveform-canvas" width="800" height="150"></canvas>
+                    <div class="audio-controls">
+                        <button class="btn btn-secondary" id="toggle-listen">
+                            <span id="listen-icon">👂</span> Toggle Listening
+                        </button>
+                        <span class="audio-status" id="audio-status">Listening...</span>
+                    </div>
+                </div>
+                
+                <!-- Spectrogram -->
+                <div class="card wide">
+                    <h2>Spectrogram</h2>
+                    <canvas id="spectrogram-canvas" width="800" height="200"></canvas>
+                </div>
+                
+                <!-- Conversation Log -->
+                <div class="card wide">
+                    <h2>Conversation</h2>
+                    <div class="conversation-log" id="conversation-log">
+                        <!-- Messages will be populated here -->
+                    </div>
+                </div>
+                
+                <!-- Message Input -->
+                <div class="card wide">
+                    <h2>Send Message</h2>
+                    <div class="message-input">
+                        <textarea id="message-text" placeholder="Type your message..." rows="3"></textarea>
+                        <div class="input-actions">
+                            <button class="btn btn-primary" onclick="sendMessage()">
+                                📡 Send via Audio
+                            </button>
+                            <button class="btn btn-secondary" onclick="sendToAI()">
+                                🤖 Send to AI
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Transmission Queue -->
+                    <div class="queue-status" id="queue-status">
+                        <h3>Transmission Queue</h3>
+                        <div id="queue-list">
+                            <p class="queue-empty">No pending transmissions</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- System Stats -->
+                <div class="card">
+                    <h2>System Resources</h2>
+                    <div class="stats-grid vertical">
+                        <div class="stat">
+                            <span class="stat-label">CPU</span>
+                            <div class="progress-bar">
+                                <div class="progress-fill cpu-bar" id="cpu-bar"></div>
+                            </div>
+                            <span class="stat-value" id="cpu-value">0%</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">RAM</span>
+                            <div class="progress-bar">
+                                <div class="progress-fill ram-bar" id="ram-bar"></div>
+                            </div>
+                            <span class="stat-value" id="ram-value">0%</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">GPU</span>
+                            <div class="progress-bar">
+                                <div class="progress-fill gpu-bar" id="gpu-bar"></div>
+                            </div>
+                            <span class="stat-value" id="gpu-value">N/A</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Party Info -->
+                <div class="card">
+                    <h2>Party Details</h2>
+                    <dl class="details-list">
+                        <dt>ID</dt>
+                        <dd>{{ party.party_id }}</dd>
+                        <dt>Signature</dt>
+                        <dd>{{ party.signature[:16] }}...</dd>
+                        <dt>Status</dt>
+                        <dd id="party-status">Active</dd>
+                    </dl>
+                </div>
+            </div>
+        </main>
+        
+        <footer class="footer">
+            <p>muwave v0.1.0 | Party: {{ party.name }}</p>
+        </footer>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script>
+        const PARTY_ID = '{{ party.party_id }}';
+        const PARTY_COLOR = '{{ color }}';
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            initSocket();
+            initWaveform('waveform-canvas', PARTY_COLOR);
+            initSpectrogram('spectrogram-canvas');
+            loadConversation();
+            
+            // Join party room
+            socket.emit('join_party', { party_id: PARTY_ID });
+        });
+        
+        function sendMessage() {
+            const text = document.getElementById('message-text').value.trim();
+            if (!text) return;
+            
+            socket.emit('send_message', {
+                text: text,
+                party_id: PARTY_ID
+            });
+            
+            addMessageToLog('user', text);
+            document.getElementById('message-text').value = '';
+        }
+        
+        function sendToAI() {
+            const text = document.getElementById('message-text').value.trim();
+            if (!text) return;
+            
+            addMessageToLog('user', text);
+            
+            fetch('/api/ai', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    prompt: text,
+                    party_id: PARTY_ID,
+                    transmit: true
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.response) {
+                    addMessageToLog('assistant', data.response);
+                }
+                if (data.error) {
+                    addMessageToLog('error', data.error);
+                }
+            });
+            
+            document.getElementById('message-text').value = '';
+        }
+        
+        function loadConversation() {
+            fetch('/api/conversation/' + PARTY_ID)
+                .then(response => response.json())
+                .then(data => {
+                    const log = document.getElementById('conversation-log');
+                    log.innerHTML = '';
+                    data.messages.forEach(msg => {
+                        addMessageToLog(msg.role, msg.content, false);
+                    });
+                });
+        }
+        
+        function addMessageToLog(role, content, scroll = true) {
+            const log = document.getElementById('conversation-log');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message message-' + role;
+            
+            const roleSpan = document.createElement('span');
+            roleSpan.className = 'message-role';
+            roleSpan.textContent = role === 'user' ? 'You' : 
+                                   role === 'assistant' ? 'AI' : 
+                                   role === 'error' ? 'Error' : role;
+            
+            const contentSpan = document.createElement('span');
+            contentSpan.className = 'message-content';
+            contentSpan.textContent = content;
+            
+            msgDiv.appendChild(roleSpan);
+            msgDiv.appendChild(contentSpan);
+            log.appendChild(msgDiv);
+            
+            if (scroll) {
+                log.scrollTop = log.scrollHeight;
+            }
+        }
+        
+        // Listen for messages
+        socket.on('message_queued', function(data) {
+            if (data.party_id === PARTY_ID) {
+                updateQueueStatus(data);
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,3 +1,43 @@
+Metadata-Version: 2.4
+Name: muwave
+Version: 0.1.0
+Summary: Sound-based communication protocol for AI agents, compatible with Linux and macOS
+Author: muwave contributors
+License: MIT
+Project-URL: Homepage, https://github.com/maple-underscore/muwave
+Project-URL: Repository, https://github.com/maple-underscore/muwave
+Keywords: audio,communication,protocol,ai,ollama,fsk
+Classifier: Development Status :: 3 - Alpha
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: MacOS
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Communications
+Classifier: Topic :: Multimedia :: Sound/Audio
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.21.0
+Requires-Dist: sounddevice>=0.4.6
+Requires-Dist: scipy>=1.7.0
+Requires-Dist: rich>=13.0.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: requests>=2.28.0
+Requires-Dist: click>=8.0.0
+Requires-Dist: flask>=2.3.0
+Requires-Dist: flask-socketio>=5.3.0
+Requires-Dist: psutil>=5.9.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: isort>=5.12.0; extra == "dev"
+Requires-Dist: mypy>=1.0.0; extra == "dev"
+
 # muwave
 
 Sound-based communication protocol for AI agents, compatible with Linux and macOS.
