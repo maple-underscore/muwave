@@ -600,5 +600,89 @@ def web(config: Optional[str], host: str, port: int, party: tuple, debug: bool):
         server.stop()
 
 
+@main.command()
+@click.argument('prompt')
+@click.option('--output', '-o', type=str, default='output.wav', help='Output WAV file path')
+@click.option('--config', '-c', type=str, default=None, help='Path to configuration file')
+@click.option('--name', '-n', type=str, default=None, help='Party name')
+def generate(prompt: str, output: str, config: Optional[str], name: Optional[str]):
+    """Generate a sound wave from a prompt and save it to a WAV file.
+    
+    This command takes a text prompt, converts it to an audio signal using
+    FSK modulation, and saves it as a WAV file that can be downloaded and played.
+    
+    Example:
+        muwave generate "Hello, World!" -o hello.wav
+    """
+    from scipy.io import wavfile
+    from muwave.audio.fsk import FSKModulator, FSKConfig
+    from muwave.ui.interface import create_interface
+    
+    # Load configuration
+    try:
+        cfg = Config(config) if config else Config()
+    except FileNotFoundError:
+        cfg = Config()
+    
+    # Create party for signature
+    party = Party(
+        party_id=cfg.protocol.get("party_id"),
+        name=name,
+        is_ai=False,
+    )
+    
+    # Create UI for output
+    ui = create_interface(cfg.ui)
+    ui.print_header()
+    ui.print_info(f"Generating sound wave for: {prompt}")
+    
+    # Get protocol settings based on speed and redundancy modes
+    speed_settings = cfg.get_speed_mode_settings()
+    redundancy_settings = cfg.get_redundancy_mode_settings()
+    
+    # Set up FSK configuration
+    fsk_config = FSKConfig(
+        sample_rate=cfg.audio.get("sample_rate", 44100),
+        base_frequency=cfg.protocol.get("base_frequency", 1000),
+        frequency_step=cfg.protocol.get("frequency_step", 100),
+        num_frequencies=cfg.protocol.get("num_frequencies", 16),
+        symbol_duration_ms=speed_settings.get("symbol_duration_ms", 50),
+        start_frequency=cfg.protocol.get("start_frequency", 500),
+        end_frequency=cfg.protocol.get("end_frequency", 600),
+        signal_duration_ms=cfg.protocol.get("signal_duration_ms", 200),
+        silence_ms=cfg.protocol.get("silence_ms", 50),
+        volume=cfg.audio.get("volume", 0.8),
+    )
+    
+    repetitions = redundancy_settings.get("repetitions", 1)
+    
+    # Create modulator and encode the text
+    modulator = FSKModulator(fsk_config)
+    audio_samples = modulator.encode_text(
+        prompt,
+        signature=party.signature,
+        repetitions=repetitions,
+    )
+    
+    # Get sample rate from config
+    sample_rate = fsk_config.sample_rate
+    
+    # Convert float32 samples to int16 for WAV file
+    # Scale from [-1.0, 1.0] to [-32767, 32767]
+    import numpy as np
+    audio_int16 = (audio_samples * 32767).astype(np.int16)
+    
+    # Save to WAV file
+    wavfile.write(output, sample_rate, audio_int16)
+    
+    # Calculate duration
+    duration_seconds = len(audio_samples) / sample_rate
+    
+    ui.print_success(f"Sound wave saved to: {output}")
+    ui.print_info(f"Duration: {duration_seconds:.2f} seconds")
+    ui.print_info(f"Sample rate: {sample_rate} Hz")
+    ui.print_info(f"Samples: {len(audio_samples)}")
+
+
 if __name__ == "__main__":
     main()
