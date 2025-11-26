@@ -33,9 +33,9 @@ speed:
       bandwidth_hz: 800
       description: "Highest speed, requires good audio conditions (28.6 symbols/sec)"
     ultra-fast:
-      symbol_duration_ms: 15
+      symbol_duration_ms: 20
       bandwidth_hz: 1200
-      description: "Maximum speed, requires excellent audio conditions (67 symbols/sec)"
+      description: "Maximum speed, requires excellent audio conditions (50 symbols/sec)"
 
 # Redundancy modes
 # Affects error correction and retry behavior
@@ -65,15 +65,17 @@ protocol:
   frequency_step: 120
   # Number of frequency bins (determines alphabet size)
   num_frequencies: 16
-  # Start signal frequency (Hz)
-  start_frequency: 800
-  # End signal frequency (Hz)
-  end_frequency: 900
+  # Start signal frequencies (Hz) - multiple simultaneous tones for better detection
+  start_frequencies: [800, 1000, 1200, 1400, 1600, 1800, 2000]
+  # End signal frequencies (Hz) - multiple simultaneous tones for better detection
+  end_frequencies: [900, 1100, 1300, 1500, 1700, 1900, 2100]
   # Start/end signal duration (ms)
-  signal_duration_ms: 200
+  signal_duration_ms: 500
   # Silence between signals (ms)
   silence_ms: 50
-  # Party identifier (unique per process)
+  # Spacing between channel base frequencies (Hz)
+  channel_spacing: 1600
+  # Party identifier (unique per process, auto-generated if null)
   party_id: null
   # Enable self-recognition for same-machine parties
   self_recognition: true
@@ -101,8 +103,8 @@ ollama:
     # Keep conversation context
     keep_context: true
     # Maximum context length
-    max_context_length: 4096
-  # System prompt for the AI
+    max_context_length: 16384
+    # System prompt for the AI
   system_prompt: "You are a helpful AI assistant communicating through an audio protocol."
 
 # User interface settings

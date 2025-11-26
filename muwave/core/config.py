@@ -68,6 +68,7 @@ class Config:
                     "slow": {"symbol_duration_ms": 120, "bandwidth_hz": 200},
                     "medium": {"symbol_duration_ms": 60, "bandwidth_hz": 400},
                     "fast": {"symbol_duration_ms": 35, "bandwidth_hz": 800},
+                    "ultra-fast": {"symbol_duration_ms": 20, "bandwidth_hz": 1200},
                 },
             },
             "redundancy": {
@@ -235,6 +236,43 @@ class Config:
         """Get settings for current redundancy mode."""
         mode = self.redundancy.get("mode", "medium")
         return self.redundancy.get("modes", {}).get(mode, {})
+    
+    def create_fsk_config(
+        self,
+        symbol_duration_ms: Optional[float] = None,
+        num_channels: Optional[int] = None,
+    ) -> 'FSKConfig':
+        """
+        Create an FSKConfig from the current configuration.
+        
+        Args:
+            symbol_duration_ms: Override symbol duration (uses speed mode setting if None)
+            num_channels: Override channel count (defaults to 2)
+            
+        Returns:
+            FSKConfig instance with values from config.yaml
+        """
+        from muwave.audio.fsk import FSKConfig
+        
+        # Get symbol duration from speed mode if not provided
+        if symbol_duration_ms is None:
+            speed_settings = self.get_speed_mode_settings()
+            symbol_duration_ms = speed_settings.get("symbol_duration_ms", 60.0)
+        
+        return FSKConfig(
+            sample_rate=self.audio.get("sample_rate", 44100),
+            base_frequency=self.protocol.get("base_frequency", 1800),
+            frequency_step=self.protocol.get("frequency_step", 120),
+            num_frequencies=self.protocol.get("num_frequencies", 16),
+            symbol_duration_ms=symbol_duration_ms,
+            start_frequencies=self.protocol.get("start_frequencies", [800, 850, 900]),
+            end_frequencies=self.protocol.get("end_frequencies", [900, 950, 1000]),
+            signal_duration_ms=self.protocol.get("signal_duration_ms", 200),
+            silence_ms=self.protocol.get("silence_ms", 50),
+            volume=self.audio.get("volume", 0.8),
+            num_channels=num_channels if num_channels is not None else 2,
+            channel_spacing=self.protocol.get("channel_spacing", 2400),
+        )
     
     def __repr__(self) -> str:
         return f"Config(path={self._config_path})"
