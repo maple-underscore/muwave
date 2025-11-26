@@ -66,6 +66,14 @@ muwave run --name "Alice"
 muwave send "Hello, World!"
 ```
 
+### Generate Sound Wave and Save to File
+
+```bash
+muwave generate "Hello, World!" -o hello.wav
+```
+
+This encodes the text into an FSK-modulated audio signal and saves it as a WAV file. The file can be downloaded and played on any device.
+
 ### Listen for Messages
 
 ```bash
@@ -85,6 +93,20 @@ muwave web --port 5000
 ```
 
 Then open http://localhost:5000 in your browser.
+
+### Quickstart Script
+
+For a one-step setup, run the quickstart script:
+
+```bash
+./quickstart.sh
+```
+
+This script will:
+- Check prerequisites (Python 3.9+, pip)
+- Install muwave and its dependencies
+- Initialize a configuration file
+- Display available commands
 
 ## Configuration
 
