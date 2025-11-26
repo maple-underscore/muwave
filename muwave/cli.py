@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 import click
+import numpy as np
+from scipy.io import wavfile
 
 from muwave.core.config import Config
 from muwave.core.party import Party, Message
@@ -31,6 +33,7 @@ from muwave.utils.helpers import (
     start_ollama_container,
     format_duration,
 )
+from muwave.audio.fsk import FSKModulator, FSKConfig
 
 
 class MuwaveApp:
@@ -614,10 +617,6 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     Example:
         muwave generate "Hello, World!" -o hello.wav
     """
-    from scipy.io import wavfile
-    from muwave.audio.fsk import FSKModulator, FSKConfig
-    from muwave.ui.interface import create_interface
-    
     # Load configuration
     try:
         cfg = Config(config) if config else Config()
@@ -669,7 +668,6 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     
     # Convert float32 samples to int16 for WAV file
     # Scale from [-1.0, 1.0] to [-32767, 32767]
-    import numpy as np
     audio_int16 = (audio_samples * 32767).astype(np.int16)
     
     # Save to WAV file
