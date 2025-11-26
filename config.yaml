@@ -21,17 +21,17 @@ speed:
   # Mode-specific settings
   modes:
     slow:
-      symbol_duration_ms: 100
+      symbol_duration_ms: 120
       bandwidth_hz: 200
-      description: "Most reliable, lowest speed (10 symbols/sec)"
+      description: "Most reliable, lowest speed (8.3 symbols/sec)"
     medium:
-      symbol_duration_ms: 50
+      symbol_duration_ms: 60
       bandwidth_hz: 400
-      description: "Balanced reliability and speed (20 symbols/sec)"
+      description: "Balanced reliability and speed (16.7 symbols/sec)"
     fast:
-      symbol_duration_ms: 25
+      symbol_duration_ms: 35
       bandwidth_hz: 800
-      description: "Highest speed, requires good audio conditions (40 symbols/sec)"
+      description: "Highest speed, requires good audio conditions (28.6 symbols/sec)"
     ultra-fast:
       symbol_duration_ms: 15
       bandwidth_hz: 1200
@@ -60,15 +60,15 @@ redundancy:
 # Protocol settings
 protocol:
   # Base frequency for FSK modulation (Hz)
-  base_frequency: 1000
+  base_frequency: 1800
   # Frequency step between symbols (Hz)
-  frequency_step: 100
+  frequency_step: 120
   # Number of frequency bins (determines alphabet size)
   num_frequencies: 16
   # Start signal frequency (Hz)
-  start_frequency: 500
+  start_frequency: 800
   # End signal frequency (Hz)
-  end_frequency: 600
+  end_frequency: 900
   # Start/end signal duration (ms)
   signal_duration_ms: 200
   # Silence between signals (ms)

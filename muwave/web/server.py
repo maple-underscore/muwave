@@ -398,12 +398,12 @@ class MuwaveWebServer:
     
     # Base frequencies for different parties (Hz)
     PARTY_FREQUENCIES = [
-        1000.0,
-        1500.0,
-        2000.0,
-        2500.0,
+        1800.0,
+        2200.0,
+        2600.0,
         3000.0,
-        3500.0,
+        3400.0,
+        3800.0,
     ]
     
     def __init__(

@@ -65,9 +65,9 @@ class Config:
             "speed": {
                 "mode": "medium",
                 "modes": {
-                    "slow": {"symbol_duration_ms": 100, "bandwidth_hz": 200},
-                    "medium": {"symbol_duration_ms": 50, "bandwidth_hz": 400},
-                    "fast": {"symbol_duration_ms": 25, "bandwidth_hz": 800},
+                    "slow": {"symbol_duration_ms": 120, "bandwidth_hz": 200},
+                    "medium": {"symbol_duration_ms": 60, "bandwidth_hz": 400},
+                    "fast": {"symbol_duration_ms": 35, "bandwidth_hz": 800},
                 },
             },
             "redundancy": {
@@ -79,11 +79,11 @@ class Config:
                 },
             },
             "protocol": {
-                "base_frequency": 1000,
-                "frequency_step": 100,
+                "base_frequency": 1800,
+                "frequency_step": 120,
                 "num_frequencies": 16,
-                "start_frequency": 500,
-                "end_frequency": 600,
+                "start_frequency": 800,
+                "end_frequency": 900,
                 "signal_duration_ms": 200,
                 "silence_ms": 50,
                 "party_id": None,

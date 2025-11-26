@@ -662,51 +662,21 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
     ui.print_info(f"Duration: {len(audio_samples) / sample_rate:.2f} seconds")
     ui.print_info(f"Samples: {len(audio_samples)}")
     
-    # Override speed mode if specified
-    if speed:
-        cfg.set("speed.mode", speed)
-    
-    # Override redundancy mode if specified
-    if redundancy:
-        cfg.set("redundancy.mode", redundancy)
-    
-    # Get protocol settings
-    speed_settings = cfg.get_speed_mode_settings()
-    redundancy_settings = cfg.get_redundancy_mode_settings()
-    
-    # Apply specific overrides
-    if symbol_duration is not None:
-        speed_settings["symbol_duration_ms"] = symbol_duration
-    
-    if repetitions is not None:
-        redundancy_settings["repetitions"] = repetitions
-    
-    # Set up FSK configuration with the WAV file's sample rate
-    fsk_config = FSKConfig(
+    # Detect start/end signals first (works with any speed)
+    # Use a temporary demodulator with default settings for signal detection
+    temp_config = FSKConfig(
         sample_rate=sample_rate,
-        base_frequency=cfg.protocol.get("base_frequency", 1000),
-        frequency_step=cfg.protocol.get("frequency_step", 100),
+        base_frequency=cfg.protocol.get("base_frequency", 1800),
+        frequency_step=cfg.protocol.get("frequency_step", 120),
         num_frequencies=cfg.protocol.get("num_frequencies", 16),
-        symbol_duration_ms=speed_settings.get("symbol_duration_ms", 50),
-        start_frequency=cfg.protocol.get("start_frequency", 500),
-        end_frequency=cfg.protocol.get("end_frequency", 600),
+        start_frequency=cfg.protocol.get("start_frequency", 800),
+        end_frequency=cfg.protocol.get("end_frequency", 900),
         signal_duration_ms=cfg.protocol.get("signal_duration_ms", 200),
-        silence_ms=cfg.protocol.get("silence_ms", 50),
-        volume=cfg.audio.get("volume", 0.8),
     )
-    
-    reps = redundancy_settings.get("repetitions", 1)
-    
-    # Display decode settings
-    ui.print_info(f"Decode settings: {cfg.speed.get('mode', 'medium')} speed (symbol: {fsk_config.symbol_duration_ms}ms), repetitions: {reps}")
-    
-    # Create demodulator
-    demodulator = FSKDemodulator(fsk_config)
+    temp_demod = FSKDemodulator(temp_config)
     
     ui.print_info("Detecting start signal...")
-    
-    # Detect start signal
-    detected, start_pos = demodulator.detect_start_signal(audio_samples)
+    detected, start_pos = temp_demod.detect_start_signal(audio_samples)
     
     if not detected:
         ui.print_error("No start signal detected")
@@ -718,31 +688,137 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
     data_samples = audio_samples[start_pos:]
     
     ui.print_info("Detecting end signal...")
-    
-    # Detect end signal
-    end_detected, end_pos = demodulator.detect_end_signal(data_samples)
+    end_detected, end_pos = temp_demod.detect_end_signal(data_samples)
     
     if not end_detected:
         ui.print_warning("No end signal detected, attempting to decode available data")
         message_samples = data_samples
+        absolute_end_pos = len(audio_samples)
     else:
         ui.print_success(f"End signal detected at position {end_pos}")
         message_samples = data_samples[:end_pos]
+        absolute_end_pos = start_pos + end_pos
     
-    ui.print_info("Decoding message...")
+    # Add debug information about signal positions
+    ui.console.print()
+    ui.console.print("[bold cyan]Debug Info:[/]")
+    ui.console.print(f"  Start signal ends at: {start_pos}")
+    ui.console.print(f"  End signal starts at: {absolute_end_pos}")
+    ui.console.print(f"  Data region length: {len(message_samples)} samples")
     
-    # Decode the message
-    text, signature, confidence = demodulator.decode_text(
-        message_samples,
-        signature_length=8,
-        repetitions=reps,
-    )
+    # Auto-detect speed if not specified
+    if speed is None and symbol_duration is None:
+        ui.print_info("Auto-detecting optimal speed settings...")
+        
+        # Test all speed modes
+        test_speeds = [
+            ("ultra-fast", 15),
+            ("fast", 35),
+            ("medium", 60),
+            ("slow", 120),
+        ]
+        
+        best_result = None
+        best_confidence = 0.0
+        
+        for speed_name, symbol_dur in test_speeds:
+            # Get redundancy settings
+            if redundancy:
+                cfg.set("redundancy.mode", redundancy)
+            redundancy_settings = cfg.get_redundancy_mode_settings()
+            reps = repetitions if repetitions is not None else redundancy_settings.get("repetitions", 1)
+            
+            # Create demodulator with this speed
+            test_config = FSKConfig(
+                sample_rate=sample_rate,
+                base_frequency=cfg.protocol.get("base_frequency", 1800),
+                frequency_step=cfg.protocol.get("frequency_step", 120),
+                num_frequencies=cfg.protocol.get("num_frequencies", 16),
+                symbol_duration_ms=symbol_dur,
+                start_frequency=cfg.protocol.get("start_frequency", 800),
+                end_frequency=cfg.protocol.get("end_frequency", 900),
+                signal_duration_ms=cfg.protocol.get("signal_duration_ms", 200),
+                silence_ms=cfg.protocol.get("silence_ms", 50),
+                volume=cfg.audio.get("volume", 0.8),
+            )
+            
+            test_demod = FSKDemodulator(test_config)
+            text, signature, confidence = test_demod.decode_text(
+                message_samples,
+                signature_length=8,
+                repetitions=reps,
+            )
+            
+            ui.console.print(f"  Testing {speed_name} ({symbol_dur}ms): ", end="")
+            if text is not None:
+                ui.console.print(f"[green]✓[/] {confidence:.2%}")
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    best_result = (speed_name, symbol_dur, text, signature, confidence, reps)
+            else:
+                ui.console.print(f"[red]✗[/] {confidence:.2%}")
+        
+        if best_result is None:
+            ui.print_error("Failed to decode with any speed setting")
+            return
+        
+        speed_name, symbol_dur, text, signature, confidence, reps = best_result
+        ui.console.print()
+        ui.print_success(f"Best match: {speed_name} speed ({symbol_dur}ms) with {confidence:.2%} confidence")
     
-    if text is None:
-        ui.print_error("Failed to decode message")
-        return
+    else:
+        # Use specified settings
+        if speed:
+            cfg.set("speed.mode", speed)
+        if redundancy:
+            cfg.set("redundancy.mode", redundancy)
+        
+        speed_settings = cfg.get_speed_mode_settings()
+        redundancy_settings = cfg.get_redundancy_mode_settings()
+        
+        if symbol_duration is not None:
+            speed_settings["symbol_duration_ms"] = symbol_duration
+        if repetitions is not None:
+            redundancy_settings["repetitions"] = repetitions
+        
+        symbol_dur = speed_settings.get("symbol_duration_ms", 60)
+        reps = redundancy_settings.get("repetitions", 1)
+        
+        fsk_config = FSKConfig(
+            sample_rate=sample_rate,
+            base_frequency=cfg.protocol.get("base_frequency", 1800),
+            frequency_step=cfg.protocol.get("frequency_step", 120),
+            num_frequencies=cfg.protocol.get("num_frequencies", 16),
+            symbol_duration_ms=symbol_dur,
+            start_frequency=cfg.protocol.get("start_frequency", 800),
+            end_frequency=cfg.protocol.get("end_frequency", 900),
+            signal_duration_ms=cfg.protocol.get("signal_duration_ms", 200),
+            silence_ms=cfg.protocol.get("silence_ms", 50),
+            volume=cfg.audio.get("volume", 0.8),
+        )
+        
+        ui.console.print()
+        ui.print_info(f"Decode settings: {cfg.speed.get('mode', 'medium')} speed (symbol: {symbol_dur}ms), repetitions: {reps}")
+        ui.print_info("Decoding message...")
+        
+        demodulator = FSKDemodulator(fsk_config)
+        text, signature, confidence = demodulator.decode_text(
+            message_samples,
+            signature_length=8,
+            repetitions=reps,
+        )
+        
+        if text is None:
+            ui.print_error(f"Failed to decode message (confidence: {confidence:.2%})")
+            ui.console.print()
+            ui.console.print("[bold yellow]Tip:[/] Try removing --speed option to auto-detect the correct settings")
+            return
+        
+        ui.print_success(f"Decoded successfully (confidence: {confidence:.2%})")
     
-    ui.print_success(f"Decoded successfully (confidence: {confidence:.2%})")
+    if confidence < 0.5:
+        ui.print_warning(f"Low confidence ({confidence:.2%}) - decoding may be inaccurate")
+    
     ui.console.print()
     ui.console.print("[bold cyan]Message:[/]")
     ui.console.print(f"  {text}")
@@ -855,6 +931,23 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     # Get sample rate from config
     sample_rate = fsk_config.sample_rate
     
+    # Calculate signal positions for debug info
+    start_signal_samples = int(sample_rate * fsk_config.signal_duration_ms / 1000)
+    silence_samples = int(sample_rate * fsk_config.silence_ms / 1000)
+    signature_samples = 8 * 2 * int(sample_rate * fsk_config.symbol_duration_ms / 1000)  # 8 bytes * 2 symbols/byte
+    length_samples = 2 * 2 * int(sample_rate * fsk_config.symbol_duration_ms / 1000)  # 2 bytes * 2 symbols/byte
+    
+    start_pos = start_signal_samples + silence_samples
+    data_start_pos = start_pos + signature_samples + (silence_samples // 2) + length_samples
+    
+    # Calculate data length
+    data_length = len(prompt.encode('utf-8'))
+    data_samples = data_length * 2 * int(sample_rate * fsk_config.symbol_duration_ms / 1000) * reps
+    if reps > 1:
+        data_samples += (reps - 1) * (silence_samples // 2)
+    
+    end_start_pos = data_start_pos + data_samples + silence_samples
+    
     # Convert float32 samples to int16 for WAV file
     # Scale from [-1.0, 1.0] to [-32767, 32767]
     audio_int16 = (audio_samples * 32767).astype(np.int16)
@@ -869,6 +962,12 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     ui.print_info(f"Duration: {duration_seconds:.2f} seconds")
     ui.print_info(f"Sample rate: {sample_rate} Hz")
     ui.print_info(f"Samples: {len(audio_samples)}")
+    ui.console.print()
+    ui.console.print("[bold cyan]Debug Info:[/]")
+    ui.console.print(f"  Signature: {party.signature.hex()}")
+    ui.console.print(f"  Start signal ends at: {start_pos}")
+    ui.console.print(f"  Data region: {data_start_pos} - {end_start_pos}")
+    ui.console.print(f"  End signal starts at: {end_start_pos}")
 
 
 if __name__ == "__main__":

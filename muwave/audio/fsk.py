@@ -12,12 +12,12 @@ from dataclasses import dataclass
 class FSKConfig:
     """Configuration for FSK modulation."""
     sample_rate: int = 44100
-    base_frequency: float = 1000.0
-    frequency_step: float = 100.0
+    base_frequency: float = 1800.0
+    frequency_step: float = 120.0
     num_frequencies: int = 16
-    symbol_duration_ms: float = 50.0
-    start_frequency: float = 500.0
-    end_frequency: float = 600.0
+    symbol_duration_ms: float = 60.0
+    start_frequency: float = 800.0
+    end_frequency: float = 900.0
     signal_duration_ms: float = 200.0
     silence_ms: float = 50.0
     volume: float = 0.8
@@ -275,19 +275,33 @@ class FSKDemodulator:
         if len(samples) == 0:
             return 0, 0.0
         
+        # Apply window function to reduce spectral leakage
+        window = np.hanning(len(samples))
+        windowed_samples = samples * window
+        
         # Use Goertzel algorithm for efficient frequency detection
         correlations = []
         for freq in target_frequencies:
-            correlation = self._goertzel(samples, freq)
+            correlation = self._goertzel(windowed_samples, freq)
             correlations.append(correlation)
         
         correlations = np.array(correlations)
+        
+        # Normalize correlations by RMS of input signal
+        signal_rms = np.sqrt(np.mean(samples ** 2))
+        if signal_rms > 1e-10:
+            correlations = correlations / (signal_rms * len(samples))
+        
         best_idx = np.argmax(correlations)
         
-        # Calculate confidence
-        total = np.sum(correlations)
-        if total > 0:
-            confidence = correlations[best_idx] / total
+        # Calculate confidence using ratio of best to second-best
+        sorted_corr = np.sort(correlations)[::-1]
+        if sorted_corr[0] > 1e-10:
+            # Ratio-based confidence is more robust
+            if len(sorted_corr) > 1 and sorted_corr[1] > 1e-10:
+                confidence = min(1.0, sorted_corr[0] / (sorted_corr[0] + sorted_corr[1]))
+            else:
+                confidence = 0.95
         else:
             confidence = 0.0
         
@@ -308,9 +322,14 @@ class FSKDemodulator:
         if n == 0:
             return 0.0
         
+        # More accurate frequency bin calculation
         k = int(0.5 + n * target_freq / self.config.sample_rate)
         w = 2 * np.pi * k / n
         coeff = 2 * np.cos(w)
+        
+        # Use sine and cosine for better magnitude calculation
+        cosine = np.cos(w)
+        sine = np.sin(w)
         
         s0, s1, s2 = 0.0, 0.0, 0.0
         for sample in samples:
@@ -318,8 +337,13 @@ class FSKDemodulator:
             s2 = s1
             s1 = s0
         
-        power = s1 * s1 + s2 * s2 - s1 * s2 * coeff
-        return np.sqrt(max(0, power))
+        # Calculate real and imaginary parts
+        real = s1 - s2 * cosine
+        imag = s2 * sine
+        
+        # Return magnitude
+        magnitude = np.sqrt(real * real + imag * imag)
+        return magnitude
     
     def detect_start_signal(
         self,
@@ -441,16 +465,19 @@ class FSKDemodulator:
         if len(samples) < symbol_samples * 2:
             return 0, 0.0
         
-        # Decode high nibble
-        high_samples = samples[:symbol_samples]
+        # Decode high nibble - use middle portion of symbol for better accuracy
+        # Skip first and last 10% to avoid transients
+        skip = max(1, symbol_samples // 10)
+        high_samples = samples[skip:symbol_samples - skip]
         high_idx, high_conf = self._detect_frequency(high_samples, self._frequencies)
         
         # Decode low nibble
-        low_samples = samples[symbol_samples:symbol_samples * 2]
+        low_samples = samples[symbol_samples + skip:symbol_samples * 2 - skip]
         low_idx, low_conf = self._detect_frequency(low_samples, self._frequencies)
         
         byte_value = (high_idx << 4) | low_idx
-        confidence = (high_conf + low_conf) / 2
+        # Use geometric mean for confidence (more conservative)
+        confidence = np.sqrt(high_conf * low_conf)
         
         return byte_value, confidence
     
@@ -479,7 +506,8 @@ class FSKDemodulator:
             self.config.sample_rate * self.config.silence_ms / 2000
         )
         
-        pos = 0
+        # Start after the initial silence that follows the start signal
+        pos = int(self.config.sample_rate * self.config.silence_ms / 1000)
         confidences = []
         
         # Decode signature
