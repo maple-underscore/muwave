@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>muwave - Sound Communication Protocol</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>🔊 muwave</h1>
+            <p>Sound-Based Communication Protocol</p>
+        </header>
+        
+        <nav class="nav">
+            <a href="/" class="nav-link active">Dashboard</a>
+            <a href="/user" class="nav-link">User Input</a>
+            {% for party in parties %}
+            <a href="/party/{{ party.party_id }}" class="nav-link" style="border-color: {{ party.color }}">
+                {{ party.name }}
+            </a>
+            {% endfor %}
+        </nav>
+        
+        <main class="main">
+            <div class="grid">
+                <!-- System Stats -->
+                <div class="card">
+                    <h2>System Resources</h2>
+                    <div class="stats-grid">
+                        <div class="stat">
+                            <span class="stat-label">CPU</span>
+                            <div class="progress-bar">
+                                <div class="progress-fill cpu-bar" id="cpu-bar"></div>
+                            </div>
+                            <span class="stat-value" id="cpu-value">0%</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">RAM</span>
+                            <div class="progress-bar">
+                                <div class="progress-fill ram-bar" id="ram-bar"></div>
+                            </div>
+                            <span class="stat-value" id="ram-value">0%</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-label">GPU</span>
+                            <div class="progress-bar">
+                                <div class="progress-fill gpu-bar" id="gpu-bar"></div>
+                            </div>
+                            <span class="stat-value" id="gpu-value">N/A</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Audio Waveform -->
+                <div class="card wide">
+                    <h2>Audio Waveform</h2>
+                    <canvas id="waveform-canvas" width="800" height="150"></canvas>
+                </div>
+                
+                <!-- Spectrogram -->
+                <div class="card wide">
+                    <h2>Spectrogram History</h2>
+                    <canvas id="spectrogram-canvas" width="800" height="200"></canvas>
+                </div>
+                
+                <!-- Active Parties -->
+                <div class="card">
+                    <h2>Active Parties</h2>
+                    <div class="parties-list" id="parties-list">
+                        {% for party in parties %}
+                        <div class="party-item" style="border-left: 4px solid {{ party.color }}">
+                            <span class="party-name">{{ party.name }}</span>
+                            <span class="party-status">
+                                {% if party.is_speaking %}🔊{% endif %}
+                                {% if party.is_listening %}👂{% endif %}
+                            </span>
+                        </div>
+                        {% else %}
+                        <p>No active parties</p>
+                        {% endfor %}
+                    </div>
+                </div>
+                
+                <!-- Quick Actions -->
+                <div class="card">
+                    <h2>Quick Actions</h2>
+                    <div class="actions">
+                        <a href="/user" class="btn btn-primary">Send Message</a>
+                        <button class="btn btn-secondary" onclick="refreshStats()">Refresh Stats</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+        
+        <footer class="footer">
+            <p>muwave v0.1.0 | Sound-based AI Communication</p>
+        </footer>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script>
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            initSocket();
+            initWaveform('waveform-canvas');
+            initSpectrogram('spectrogram-canvas');
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,142 @@
+# Default configuration for muwave sound-based communication protocol
+
+# Audio settings
+audio:
+  # Sample rate in Hz (standard audio sample rate)
+  sample_rate: 44100
+  # Audio buffer size for recording/playback
+  buffer_size: 1024
+  # Volume level for transmission (0.0 to 1.0)
+  volume: 0.8
+  # Input device (null for system default)
+  input_device: null
+  # Output device (null for system default)
+  output_device: null
+
+# Transmission speed modes
+# Affects the symbol duration and bandwidth
+speed:
+  # Current mode: slow, medium, fast
+  mode: medium
+  # Mode-specific settings
+  modes:
+    slow:
+      symbol_duration_ms: 100
+      bandwidth_hz: 200
+      description: "Most reliable, lowest speed (10 symbols/sec)"
+    medium:
+      symbol_duration_ms: 50
+      bandwidth_hz: 400
+      description: "Balanced reliability and speed (20 symbols/sec)"
+    fast:
+      symbol_duration_ms: 25
+      bandwidth_hz: 800
+      description: "Highest speed, requires good audio conditions (40 symbols/sec)"
+
+# Redundancy modes
+# Affects error correction and retry behavior
+redundancy:
+  # Current mode: low, medium, high
+  mode: medium
+  # Mode-specific settings
+  modes:
+    low:
+      repetitions: 1
+      error_correction: false
+      description: "No redundancy, fastest but least reliable"
+    medium:
+      repetitions: 2
+      error_correction: true
+      description: "Basic error correction with 2x repetition"
+    high:
+      repetitions: 3
+      error_correction: true
+      description: "Maximum reliability with 3x repetition and error correction"
+
+# Protocol settings
+protocol:
+  # Base frequency for FSK modulation (Hz)
+  base_frequency: 1000
+  # Frequency step between symbols (Hz)
+  frequency_step: 100
+  # Number of frequency bins (determines alphabet size)
+  num_frequencies: 16
+  # Start signal frequency (Hz)
+  start_frequency: 500
+  # End signal frequency (Hz)
+  end_frequency: 600
+  # Start/end signal duration (ms)
+  signal_duration_ms: 200
+  # Silence between signals (ms)
+  silence_ms: 50
+  # Party identifier (unique per process)
+  party_id: null
+  # Enable self-recognition for same-machine parties
+  self_recognition: true
+
+# Ollama integration
+ollama:
+  # Connection mode: docker, terminal, http
+  mode: docker
+  # Docker container settings
+  docker:
+    container_name: "ollama"
+    host: "localhost"
+    port: 11434
+  # Terminal command settings
+  terminal:
+    command: "ollama"
+    timeout_seconds: 120
+  # HTTP API settings
+  http:
+    base_url: "http://localhost:11434"
+    timeout_seconds: 120
+  # Model settings
+  model:
+    name: "llama3.2"
+    # Keep conversation context
+    keep_context: true
+    # Maximum context length
+    max_context_length: 4096
+  # System prompt for the AI
+  system_prompt: "You are a helpful AI assistant communicating through an audio protocol."
+
+# User interface settings
+ui:
+  # Enable rich text interface
+  rich_interface: true
+  # Color scheme for transmission status
+  colors:
+    waiting: "yellow"
+    sending: "blue"
+    sent: "green"
+    receiving: "cyan"
+    error: "red"
+  # Show real-time receiving output
+  show_receiving: true
+  # Show transmission progress
+  show_progress: true
+
+# Logging settings
+logging:
+  # Enable conversation logging
+  enabled: true
+  # Log file path (relative to current directory)
+  file: "muwave_conversation.log"
+  # Log format: text, json
+  format: text
+  # Include timestamps
+  timestamps: true
+  # Log level: debug, info, warning, error
+  level: info
+
+# Process synchronization
+sync:
+  # Wait for audio processes to complete before text input
+  wait_for_audio: true
+  # Timeout for waiting (seconds)
+  timeout_seconds: 30
+  # IPC method: file, socket
+  ipc_method: file
+  # IPC file path for file-based sync
+  ipc_file: "/tmp/muwave_sync.lock"
