@@ -60,6 +60,9 @@ class SystemStats:
 class SystemMonitor:
     """Monitor system resources (CPU, RAM, GPU)."""
     
+    # Cache GPU stats for this many seconds to reduce subprocess overhead
+    GPU_CACHE_SECONDS = 5.0
+    
     def __init__(self, update_interval: float = 1.0):
         """
         Initialize system monitor.
@@ -72,6 +75,7 @@ class SystemMonitor:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._gpu_available = self._check_gpu()
+        self._last_gpu_update = 0.0
     
     def _check_gpu(self) -> bool:
         """Check if GPU monitoring is available."""
@@ -98,8 +102,9 @@ class SystemMonitor:
         self._stats.ram_used_gb = memory.used / (1024 ** 3)
         self._stats.ram_total_gb = memory.total / (1024 ** 3)
         
-        # GPU (if available)
-        if self._gpu_available:
+        # GPU (if available, with caching to reduce subprocess overhead)
+        current_time = time.time()
+        if self._gpu_available and (current_time - self._last_gpu_update >= self.GPU_CACHE_SECONDS):
             try:
                 import subprocess
                 # Get GPU utilization
@@ -116,6 +121,7 @@ class SystemMonitor:
                         self._stats.gpu_percent = float(parts[0].strip())
                         self._stats.gpu_memory_used_gb = float(parts[1].strip()) / 1024
                         self._stats.gpu_memory_total_gb = float(parts[2].strip()) / 1024
+                        self._last_gpu_update = current_time
             except (subprocess.TimeoutExpired, ValueError, IndexError):
                 pass
     
@@ -433,7 +439,9 @@ class MuwaveWebServer:
             template_folder=str(template_dir),
             static_folder=str(static_dir),
         )
-        self.app.config['SECRET_KEY'] = os.urandom(24).hex()
+        # Use environment variable or generate a random key
+        # Note: In production, set MUWAVE_SECRET_KEY environment variable for session persistence
+        self.app.config['SECRET_KEY'] = os.environ.get('MUWAVE_SECRET_KEY', os.urandom(24).hex())
         self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode='threading')
         
         # Components

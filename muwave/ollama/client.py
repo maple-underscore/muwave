@@ -173,7 +173,11 @@ class OllamaClient:
             else:
                 # Handle non-streaming response
                 data = response.json()
-                assistant_response = data.get("message", {}).get("content", "")
+                if "message" not in data or "content" not in data.get("message", {}):
+                    raise OllamaError(
+                        f"Unexpected API response format. Expected 'message.content' but got: {list(data.keys())}"
+                    )
+                assistant_response = data["message"]["content"]
             
             # Add assistant response to context
             if self.config.keep_context:
