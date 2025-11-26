@@ -16,7 +16,7 @@ audio:
 # Transmission speed modes
 # Affects the symbol duration and bandwidth
 speed:
-  # Current mode: slow, medium, fast
+  # Current mode: slow, medium, fast, ultra-fast
   mode: medium
   # Mode-specific settings
   modes:
@@ -32,6 +32,10 @@ speed:
       symbol_duration_ms: 25
       bandwidth_hz: 800
       description: "Highest speed, requires good audio conditions (40 symbols/sec)"
+    ultra-fast:
+      symbol_duration_ms: 15
+      bandwidth_hz: 1200
+      description: "Maximum speed, requires excellent audio conditions (67 symbols/sec)"
 
 # Redundancy modes
 # Affects error correction and retry behavior

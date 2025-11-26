@@ -50,12 +50,25 @@ check_python || { echo "Please install Python 3.9 or higher"; exit 1; }
 check_pip || { echo "Please install pip"; exit 1; }
 
 echo ""
+
+# Check if virtual environment exists, create if not
+if [ ! -d "$SCRIPT_DIR/.venv" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv "$SCRIPT_DIR/.venv"
+    echo "✓ Virtual environment created"
+    echo ""
+fi
+
+echo "Activating virtual environment..."
+source "$SCRIPT_DIR/.venv/bin/activate"
+echo ""
+
 echo "Installing muwave..."
 echo ""
 
 # Install muwave in editable mode
 cd "$SCRIPT_DIR"
-pip3 install -e . --quiet
+pip install -e . --quiet
 
 echo "✓ muwave installed successfully"
 echo ""

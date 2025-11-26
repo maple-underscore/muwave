@@ -33,7 +33,7 @@ from muwave.utils.helpers import (
     start_ollama_container,
     format_duration,
 )
-from muwave.audio.fsk import FSKModulator, FSKConfig
+from muwave.audio.fsk import FSKModulator, FSKDemodulator, FSKConfig
 
 
 class MuwaveApp:
@@ -604,18 +604,181 @@ def web(config: Optional[str], host: str, port: int, party: tuple, debug: bool):
 
 
 @main.command()
+@click.argument('input_file', type=click.Path(exists=True))
+@click.option('--config', '-c', type=str, default=None, help='Path to configuration file')
+@click.option('--speed', '-s', type=click.Choice(['slow', 'medium', 'fast', 'ultra-fast'], case_sensitive=False), default=None, help='Speed mode used during encoding')
+@click.option('--redundancy', '-r', type=click.Choice(['low', 'medium', 'high'], case_sensitive=False), default=None, help='Redundancy mode used during encoding')
+@click.option('--symbol-duration', type=float, default=None, help='Symbol duration in milliseconds (overrides speed mode)')
+@click.option('--repetitions', type=int, default=None, help='Number of repetitions (overrides redundancy mode)')
+def decode(input_file: str, config: Optional[str], speed: Optional[str], 
+           redundancy: Optional[str], symbol_duration: Optional[float], 
+           repetitions: Optional[int]):
+    """Decode a WAV file and extract the message.
+    
+    This command takes a WAV file containing an FSK-encoded message,
+    decodes it, and prints the decoded text.
+    
+    By default, uses the settings from config.yaml. If the file was encoded
+    with different settings, specify them with --speed and --redundancy options.
+    
+    Examples:
+        muwave decode input.wav
+        muwave decode input.wav --speed fast --redundancy high
+        muwave decode input.wav --symbol-duration 25 --repetitions 3
+    """
+    # Load configuration
+    try:
+        cfg = Config(config) if config else Config()
+    except FileNotFoundError:
+        cfg = Config()
+    
+    # Create UI for output
+    ui = create_interface(cfg.ui)
+    ui.print_header()
+    ui.print_info(f"Decoding WAV file: {input_file}")
+    
+    # Read WAV file
+    try:
+        sample_rate, audio_data = wavfile.read(input_file)
+    except Exception as e:
+        ui.print_error(f"Failed to read WAV file: {e}")
+        return
+    
+    # Convert to float32 [-1.0, 1.0]
+    if audio_data.dtype == np.int16:
+        audio_samples = audio_data.astype(np.float32) / 32767.0
+    elif audio_data.dtype == np.int32:
+        audio_samples = audio_data.astype(np.float32) / 2147483647.0
+    elif audio_data.dtype == np.uint8:
+        audio_samples = (audio_data.astype(np.float32) - 128) / 128.0
+    else:
+        audio_samples = audio_data.astype(np.float32)
+    
+    # Handle stereo by taking first channel
+    if len(audio_samples.shape) > 1:
+        audio_samples = audio_samples[:, 0]
+    
+    ui.print_info(f"Sample rate: {sample_rate} Hz")
+    ui.print_info(f"Duration: {len(audio_samples) / sample_rate:.2f} seconds")
+    ui.print_info(f"Samples: {len(audio_samples)}")
+    
+    # Override speed mode if specified
+    if speed:
+        cfg.set("speed.mode", speed)
+    
+    # Override redundancy mode if specified
+    if redundancy:
+        cfg.set("redundancy.mode", redundancy)
+    
+    # Get protocol settings
+    speed_settings = cfg.get_speed_mode_settings()
+    redundancy_settings = cfg.get_redundancy_mode_settings()
+    
+    # Apply specific overrides
+    if symbol_duration is not None:
+        speed_settings["symbol_duration_ms"] = symbol_duration
+    
+    if repetitions is not None:
+        redundancy_settings["repetitions"] = repetitions
+    
+    # Set up FSK configuration with the WAV file's sample rate
+    fsk_config = FSKConfig(
+        sample_rate=sample_rate,
+        base_frequency=cfg.protocol.get("base_frequency", 1000),
+        frequency_step=cfg.protocol.get("frequency_step", 100),
+        num_frequencies=cfg.protocol.get("num_frequencies", 16),
+        symbol_duration_ms=speed_settings.get("symbol_duration_ms", 50),
+        start_frequency=cfg.protocol.get("start_frequency", 500),
+        end_frequency=cfg.protocol.get("end_frequency", 600),
+        signal_duration_ms=cfg.protocol.get("signal_duration_ms", 200),
+        silence_ms=cfg.protocol.get("silence_ms", 50),
+        volume=cfg.audio.get("volume", 0.8),
+    )
+    
+    reps = redundancy_settings.get("repetitions", 1)
+    
+    # Display decode settings
+    ui.print_info(f"Decode settings: {cfg.speed.get('mode', 'medium')} speed (symbol: {fsk_config.symbol_duration_ms}ms), repetitions: {reps}")
+    
+    # Create demodulator
+    demodulator = FSKDemodulator(fsk_config)
+    
+    ui.print_info("Detecting start signal...")
+    
+    # Detect start signal
+    detected, start_pos = demodulator.detect_start_signal(audio_samples)
+    
+    if not detected:
+        ui.print_error("No start signal detected")
+        return
+    
+    ui.print_success(f"Start signal detected at position {start_pos}")
+    
+    # Extract data after start signal
+    data_samples = audio_samples[start_pos:]
+    
+    ui.print_info("Detecting end signal...")
+    
+    # Detect end signal
+    end_detected, end_pos = demodulator.detect_end_signal(data_samples)
+    
+    if not end_detected:
+        ui.print_warning("No end signal detected, attempting to decode available data")
+        message_samples = data_samples
+    else:
+        ui.print_success(f"End signal detected at position {end_pos}")
+        message_samples = data_samples[:end_pos]
+    
+    ui.print_info("Decoding message...")
+    
+    # Decode the message
+    text, signature, confidence = demodulator.decode_text(
+        message_samples,
+        signature_length=8,
+        repetitions=reps,
+    )
+    
+    if text is None:
+        ui.print_error("Failed to decode message")
+        return
+    
+    ui.print_success(f"Decoded successfully (confidence: {confidence:.2%})")
+    ui.console.print()
+    ui.console.print("[bold cyan]Message:[/]")
+    ui.console.print(f"  {text}")
+    
+    if signature:
+        ui.console.print()
+        ui.console.print("[bold cyan]Sender signature:[/]")
+        ui.console.print(f"  {signature.hex()}")
+    
+    ui.console.print()
+
+
+@main.command()
 @click.argument('prompt')
 @click.option('--output', '-o', type=str, default='output.wav', help='Output WAV file path')
 @click.option('--config', '-c', type=str, default=None, help='Path to configuration file')
 @click.option('--name', '-n', type=str, default=None, help='Party name')
-def generate(prompt: str, output: str, config: Optional[str], name: Optional[str]):
+@click.option('--speed', '-s', type=click.Choice(['slow', 'medium', 'fast', 'ultra-fast'], case_sensitive=False), default=None, help='Speed mode (overrides config)')
+@click.option('--redundancy', '-r', type=click.Choice(['low', 'medium', 'high'], case_sensitive=False), default=None, help='Redundancy mode (overrides config)')
+@click.option('--symbol-duration', type=float, default=None, help='Symbol duration in milliseconds (overrides speed mode)')
+@click.option('--repetitions', type=int, default=None, help='Number of repetitions (overrides redundancy mode)')
+@click.option('--volume', '-v', type=float, default=None, help='Audio volume (0.0 to 1.0)')
+def generate(prompt: str, output: str, config: Optional[str], name: Optional[str], 
+             speed: Optional[str], redundancy: Optional[str], 
+             symbol_duration: Optional[float], repetitions: Optional[int],
+             volume: Optional[float]):
     """Generate a sound wave from a prompt and save it to a WAV file.
     
     This command takes a text prompt, converts it to an audio signal using
     FSK modulation, and saves it as a WAV file that can be downloaded and played.
     
-    Example:
+    Examples:
         muwave generate "Hello, World!" -o hello.wav
+        muwave generate "Test message" -o test.wav --speed fast --redundancy high
+        muwave generate "Quick" -o quick.wav --symbol-duration 25 --repetitions 3
+        muwave generate "Loud" -o loud.wav --volume 1.0
     """
     # Load configuration
     try:
@@ -635,9 +798,30 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     ui.print_header()
     ui.print_info(f"Generating sound wave for: {prompt}")
     
+    # Override speed mode if specified
+    if speed:
+        cfg.set("speed.mode", speed)
+    
+    # Override redundancy mode if specified
+    if redundancy:
+        cfg.set("redundancy.mode", redundancy)
+    
     # Get protocol settings based on speed and redundancy modes
     speed_settings = cfg.get_speed_mode_settings()
     redundancy_settings = cfg.get_redundancy_mode_settings()
+    
+    # Apply specific overrides
+    if symbol_duration is not None:
+        speed_settings["symbol_duration_ms"] = symbol_duration
+    
+    if repetitions is not None:
+        redundancy_settings["repetitions"] = repetitions
+    
+    if volume is not None:
+        if not 0.0 <= volume <= 1.0:
+            ui.print_error("Volume must be between 0.0 and 1.0")
+            return
+        cfg.set("audio.volume", volume)
     
     # Set up FSK configuration
     fsk_config = FSKConfig(
@@ -653,14 +837,19 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
         volume=cfg.audio.get("volume", 0.8),
     )
     
-    repetitions = redundancy_settings.get("repetitions", 1)
+    reps = redundancy_settings.get("repetitions", 1)
+    
+    # Display settings
+    ui.print_info(f"Speed: {cfg.speed.get('mode', 'medium')} (symbol: {fsk_config.symbol_duration_ms}ms)")
+    ui.print_info(f"Redundancy: {cfg.redundancy.get('mode', 'medium')} (repetitions: {reps})")
+    ui.print_info(f"Volume: {fsk_config.volume:.1f}")
     
     # Create modulator and encode the text
     modulator = FSKModulator(fsk_config)
     audio_samples = modulator.encode_text(
         prompt,
         signature=party.signature,
-        repetitions=repetitions,
+        repetitions=reps,
     )
     
     # Get sample rate from config
