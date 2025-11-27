@@ -79,14 +79,6 @@ venv.bak/
 *.log
 muwave_conversation.log
 
-# Audio files
-*.wav
-*.mp3
-*.flac
-*.ogg
-*.aiff
-*.m4a
-
 # Lock files
 *.lock
 /tmp/
