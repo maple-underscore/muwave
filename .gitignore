@@ -70,6 +70,9 @@ venv.bak/
 *.swo
 *~
 
+# Audio
+*.wav
+
 # macOS
 .DS_Store
 .AppleDouble

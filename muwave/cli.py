@@ -185,6 +185,8 @@ class MuwaveApp:
     
     def _on_message_received(self, message: Message, is_own: bool) -> None:
         """Handle received message."""
+        from muwave.utils.formats import format_content_for_display, FormatMetadata, ContentFormat
+        
         # If it's our own signature while we're currently transmitting, ignore
         # to prevent echo/duplicates. But allow showing "self" messages when
         # not actively transmitting (e.g., playing back a test file locally).
@@ -201,8 +203,24 @@ class MuwaveApp:
             message.sender_id,
         )
         
+        # Format content for display if it has format metadata
+        display_content = message.content
+        if message.content_format:
+            try:
+                # Reconstruct format metadata
+                format_type = None
+                for fmt in ContentFormat:
+                    if fmt.value == message.content_format or fmt.name.lower() == message.content_format.lower():
+                        format_type = fmt
+                        break
+                if format_type:
+                    format_meta = FormatMetadata(format_type, language=message.format_language)
+                    display_content = format_content_for_display(message.content, format_meta)
+            except Exception:
+                pass  # Fall back to plain display
+        
         self.ui.show_receiving_output(
-            message.content,
+            display_content,
             ReceiveStatus.COMPLETE,
             message.sender_id[:8] if message.sender_id else None,
         )
@@ -845,12 +863,18 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
                 redundancy_settings_local = cfg.get_redundancy_mode_settings()
                 reps_local = repetitions if repetitions is not None else redundancy_settings_local.get("repetitions", 1)
                 demod = FSKDemodulator(local_cfg)
-                text, signature, confidence = demod.decode_text(
+                data, signature, confidence = demod.decode_data(
                     message_samples,
                     signature_length=8,
                     repetitions=reps_local,
                     read_metadata=False,
                 )
+                # Decode formatted content
+                from muwave.utils.formats import FormatEncoder
+                if data:
+                    text, _ = FormatEncoder.decode(data)
+                else:
+                    text = None
                 return (speed_name, symbol_dur, text, signature, confidence, reps_local)
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -888,12 +912,20 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
             ui.print_info(f"Decoding with detected settings: {num_channels} channels, {symbol_dur}ms symbols...")
             
             demodulator = FSKDemodulator(fsk_config)
-            text, signature, confidence = demodulator.decode_text(
+            data, signature, confidence = demodulator.decode_data(
                 message_samples,
                 signature_length=8,
                 repetitions=reps,
-                read_metadata=True,  # Let decode_text handle metadata skipping
+                read_metadata=True,  # Let decode_data handle metadata skipping
             )
+            
+            # Decode formatted content
+            from muwave.utils.formats import FormatEncoder
+            if data:
+                text, format_meta = FormatEncoder.decode(data)
+            else:
+                text = None
+                format_meta = None
             
             ui.console.print()
             ui.print_success(f"Decoded using metadata: {num_channels} channels, {symbol_dur}ms ({confidence:.2%} confidence)")
@@ -926,11 +958,19 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
         ui.print_info("Decoding message...")
         
         demodulator = FSKDemodulator(fsk_config)
-        text, signature, confidence = demodulator.decode_text(
+        data, signature, confidence = demodulator.decode_data(
             message_samples,
             signature_length=8,
             repetitions=reps,
         )
+        
+        # Decode formatted content
+        from muwave.utils.formats import FormatEncoder
+        if data:
+            text, format_meta = FormatEncoder.decode(data)
+        else:
+            text = None
+            format_meta = None
         
         if text is None:
             ui.print_error(f"Failed to decode message (confidence: {confidence:.2%})")
@@ -943,9 +983,14 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
     if confidence < 0.5:
         ui.print_warning(f"Low confidence ({confidence:.2%}) - decoding may be inaccurate")
     
+    # Format content for display using already-decoded format metadata
+    from muwave.utils.formats import format_content_for_display
+    
+    display_text = format_content_for_display(text, format_meta)
+    
     ui.console.print()
     ui.console.print("[bold cyan]Message:[/]")
-    ui.console.print(f"  {text}")
+    ui.console.print(display_text)
     
     if signature:
         ui.console.print()
@@ -967,10 +1012,13 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
 @click.option('--volume', '-v', type=float, default=None, help='Audio volume (0.0 to 1.0)')
 @click.option('--channels', type=click.Choice(['1', '2', '3', '4'], case_sensitive=False), default=None, help='Number of frequency channels (1=mono, 2=dual, 3=tri, 4=quad). Higher=faster but less accurate.')
 @click.option('--file', '-f', is_flag=True, help='Treat PROMPT as a file path and encode its contents')
+@click.option('--format', type=click.Choice(['plain', 'markdown', 'html', 'json', 'xml', 'code', 'yaml', 'auto'], case_sensitive=False), default='auto', help='Content format (auto=detect automatically)')
+@click.option('--language', '-l', type=str, default=None, help='Programming language for code blocks')
 def generate(prompt: str, output: str, config: Optional[str], name: Optional[str], 
              speed: Optional[str], redundancy: Optional[str], 
              symbol_duration: Optional[float], repetitions: Optional[int],
-             volume: Optional[float], channels: Optional[str], file: bool):
+             volume: Optional[float], channels: Optional[str], file: bool,
+             format: Optional[str], language: Optional[str]):
     """Generate a sound wave from a prompt or file and save it to a WAV file.
     
     This command takes a text prompt (or file with --file), converts it to an audio 
@@ -1058,10 +1106,38 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     ui.print_info(f"Volume: {fsk_config.volume:.1f}")
     ui.print_info(f"Channels: {num_channels} {'(mono)' if num_channels == 1 else '(dual)' if num_channels == 2 else '(tri)' if num_channels == 3 else '(quad)'}")
     
-    # Create modulator and encode the text
+    # Detect or set format
+    from muwave.utils.formats import FormatEncoder, FormatDetector, FormatMetadata, ContentFormat
+    
+    format_meta = None
+    if format and format != 'auto':
+        # Map format string to ContentFormat enum
+        format_map = {
+            'plain': ContentFormat.PLAIN_TEXT,
+            'markdown': ContentFormat.MARKDOWN,
+            'html': ContentFormat.HTML,
+            'json': ContentFormat.JSON,
+            'xml': ContentFormat.XML,
+            'code': ContentFormat.CODE,
+            'yaml': ContentFormat.YAML,
+        }
+        if format.lower() in format_map:
+            format_meta = FormatMetadata(format_map[format.lower()], language=language)
+            ui.print_info(f"Format: {format.upper()}" + (f" ({language})" if language else ""))
+    else:
+        # Auto-detect format
+        format_meta = FormatDetector.detect(text_to_encode)
+        ui.print_info(f"Detected format: {format_meta.format_type.name}" + 
+                     (f" ({format_meta.language})" if format_meta.language else "") +
+                     f" (confidence: {format_meta.confidence:.0%})")
+    
+    # Encode content with format metadata
+    encoded_data = FormatEncoder.encode(text_to_encode, format_meta)
+    
+    # Create modulator and encode the data
     modulator = FSKModulator(fsk_config)
-    audio_samples = modulator.encode_text(
-        text_to_encode,
+    audio_samples = modulator.encode_data(
+        encoded_data,
         signature=party.signature,
         repetitions=reps,
     )

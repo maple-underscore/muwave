@@ -16,6 +16,7 @@ from scipy import signal as scipy_signal
 from muwave.audio.fsk import FSKDemodulator, FSKConfig
 from muwave.audio.device import AudioDevice, AudioBuffer
 from muwave.core.party import Party, Message
+from muwave.utils.formats import FormatEncoder, format_content_for_display
 
 
 class ReceiverState(Enum):
@@ -258,16 +259,25 @@ class Receiver:
                     self._update_progress(ReceiverState.DECODING)
                     
                     # Decode the message (always read metadata for auto-detection)
-                    text, signature, confidence = self._demodulator.decode_text(
+                    data, signature, confidence = self._demodulator.decode_data(
                         message_samples,
                         signature_length=8,
                         repetitions=self._repetitions,
                         read_metadata=True,
                     )
                     
-                    logger.info(f"[Receiver] Decoded: text={text}, confidence={confidence:.2f}")
+                    logger.info(f"[Receiver] Decoded: data_length={len(data) if data else 0}, confidence={confidence:.2f}")
                     
-                    if text is not None and confidence > 0.2:
+                    if data is not None and confidence > 0.2:
+                        # Decode formatted content
+                        text, format_meta = FormatEncoder.decode(data)
+                        
+                        if text is None or text == "":
+                            logger.warning(f"[Receiver] Failed to decode content")
+                            continue
+                        
+                        logger.info(f"[Receiver] Decoded text: {text[:100]}..., format: {format_meta.format_type if format_meta else 'unknown'}")
+                        
                         # Check if it's our own transmission
                         is_own = False
                         sender_sig = None
@@ -284,12 +294,14 @@ class Receiver:
                             is_own_transmission=is_own,
                         )
                         
-                        # Create message
+                        # Create message with format metadata
                         message = Message(
                             content=text,
                             sender_id=sender_sig or "unknown",
                             message_type="audio",
                             received=True,
+                            content_format=format_meta.format_type.value if format_meta else None,
+                            format_language=format_meta.language if format_meta else None,
                         )
                         
                         with self._lock:

@@ -22,6 +22,8 @@ class Message:
     message_type: str = "text"  # text, audio, system
     transmitted: bool = False
     received: bool = False
+    content_format: Optional[str] = None  # Format type (markdown, html, json, etc.)
+    format_language: Optional[str] = None  # Language for code blocks
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert message to dictionary."""
@@ -32,6 +34,8 @@ class Message:
             "message_type": self.message_type,
             "transmitted": self.transmitted,
             "received": self.received,
+            "content_format": self.content_format,
+            "format_language": self.format_language,
         }
 
 

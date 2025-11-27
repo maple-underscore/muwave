@@ -263,7 +263,7 @@ Legacy files with single-frequency signals can still be decoded (backward compat
 ## Best Practices
 
 1. **Start with defaults**: The default configuration is tuned for general use
-2. **Test changes**: Use the CLI or write simple test scripts to verify custom configurations
+2. **Test changes**: Use `demo_channels.py` to verify custom configurations
 3. **Document modifications**: Add comments explaining why you changed values
 4. **Version control**: Track `config.yaml` in your repository
 5. **Environment-specific**: Consider separate configs for different deployment environments
@@ -299,4 +299,4 @@ If audio sounds distorted or clipped:
 
 - [README.md](README.md) - General usage guide
 - [PARALLEL_DECODE.md](PARALLEL_DECODE.md) - Parallel decoding feature
-- [config.yaml](../config.yaml) - Default configuration file
+- [config.yaml](config.yaml) - Default configuration file

@@ -393,8 +393,14 @@ class FSKDemodulator:
             return 0, 0.0
         
         # Apply window function to reduce spectral leakage
-        window = np.hanning(len(samples))
+        # Use Hamming for better frequency resolution
+        window = np.hamming(len(samples))
         windowed_samples = samples * window
+        
+        # Calculate signal energy for normalization
+        signal_energy = np.sum(windowed_samples ** 2)
+        if signal_energy < 1e-20:
+            return 0, 0.0
         
         # Use Goertzel algorithm for efficient frequency detection
         correlations = []
@@ -404,25 +410,34 @@ class FSKDemodulator:
         
         correlations = np.array(correlations)
         
-        # Normalize correlations
-        signal_rms = np.sqrt(np.mean(samples ** 2))
-        if signal_rms > 1e-10:
-            correlations = correlations / (signal_rms * len(samples))
+        # Improved normalization: divide by sqrt of signal energy
+        # This gives better relative magnitudes
+        correlations = correlations / np.sqrt(signal_energy)
         
         best_idx = np.argmax(correlations)
         
-        # Calculate confidence using ratio of best to second-best
+        # Calculate confidence using multiple metrics
         sorted_corr = np.sort(correlations)[::-1]
         if sorted_corr[0] > 1e-10:
-            # Ratio-based confidence is more robust
             if len(sorted_corr) > 1 and sorted_corr[1] > 1e-10:
-                # For multi-channel, we expect lower relative power per frequency
-                # Use separation ratio with adaptive boost
+                # Metric 1: Separation ratio (how much better is the best vs second-best)
                 separation = (sorted_corr[0] - sorted_corr[1]) / sorted_corr[0]
-                # Better normalization: peak vs total energy
-                ratio = sorted_corr[0] / np.sum(sorted_corr)
-                # Combine separation and ratio for confidence
-                confidence = min(1.0, (separation * 0.4 + ratio * 1.2))
+                
+                # Metric 2: Energy concentration (best vs total)
+                total_energy = np.sum(correlations ** 2)
+                concentration = (sorted_corr[0] ** 2) / total_energy if total_energy > 0 else 0
+                
+                # Metric 3: Signal strength relative to expected
+                # For good signals, expect correlation > 0.3 after normalization
+                strength = min(1.0, sorted_corr[0] / 0.3)
+                
+                # Combined confidence with weights
+                confidence = (
+                    separation * 0.35 +    # How distinct is the peak
+                    concentration * 0.35 + # How focused is the energy
+                    strength * 0.30        # How strong is the signal
+                )
+                confidence = min(1.0, max(0.0, confidence))
             else:
                 confidence = 0.95
         else:
@@ -445,18 +460,19 @@ class FSKDemodulator:
         if n == 0:
             return 0.0
         
-        # More accurate frequency bin calculation
-        k = int(0.5 + n * target_freq / self.config.sample_rate)
-        w = 2 * np.pi * k / n
-        coeff = 2 * np.cos(w)
+        # Use exact frequency instead of nearest bin for better accuracy
+        normalized_freq = target_freq / self.config.sample_rate
+        w = 2.0 * np.pi * normalized_freq
+        coeff = 2.0 * np.cos(w)
         
-        # Use sine and cosine for better magnitude calculation
+        # Use sine and cosine for magnitude calculation
         cosine = np.cos(w)
         sine = np.sin(w)
         
+        # Goertzel filter with improved numerical stability
         s0, s1, s2 = 0.0, 0.0, 0.0
         for sample in samples:
-            s0 = sample + coeff * s1 - s2
+            s0 = float(sample) + coeff * s1 - s2
             s2 = s1
             s1 = s0
         
@@ -464,14 +480,14 @@ class FSKDemodulator:
         real = s1 - s2 * cosine
         imag = s2 * sine
         
-        # Return magnitude
+        # Return magnitude (without 2/n scaling - preserve absolute magnitude)
         magnitude = np.sqrt(real * real + imag * imag)
         return magnitude
     
     def detect_start_signal(
         self,
         samples: np.ndarray,
-        threshold: float = 0.15,
+        threshold: float = 0.12,  # Lower threshold for better detection
     ) -> Tuple[bool, int]:
         """
         Detect the start signal in audio using multiple simultaneous frequencies.
@@ -491,6 +507,9 @@ class FSKDemodulator:
         for i in range(0, len(samples) - window_size, step_size):
             window = samples[i:i + window_size]
             
+            # Remove DC offset for better detection
+            window = window - np.mean(window)
+            
             # Calculate window RMS for normalization
             window_rms = np.sqrt(np.mean(window ** 2))
             if window_rms < 0.01:  # Skip silent regions
@@ -502,11 +521,8 @@ class FSKDemodulator:
             
             for freq in self.config.start_frequencies:
                 magnitude = self._goertzel(window, freq)
-                # Normalize by window length and RMS
-                if window_rms > 1e-10:
-                    normalized_mag = magnitude / (len(window) * window_rms)
-                else:
-                    normalized_mag = 0.0
+                # Normalize by window length and RMS for relative comparison
+                normalized_mag = magnitude / (len(window) * window_rms) if window_rms > 1e-10 else 0.0
                 magnitudes.append(normalized_mag)
                 
                 # Check if this frequency is present (lower threshold for multi-freq)
@@ -523,7 +539,7 @@ class FSKDemodulator:
     def detect_end_signal(
         self,
         samples: np.ndarray,
-        threshold: float = 0.15,
+        threshold: float = 0.12,  # Lower threshold for better detection
     ) -> Tuple[bool, int]:
         """
         Detect the end signal in audio using multiple simultaneous frequencies.
@@ -543,6 +559,9 @@ class FSKDemodulator:
         for i in range(0, len(samples) - window_size, step_size):
             window = samples[i:i + window_size]
             
+            # Remove DC offset for better detection
+            window = window - np.mean(window)
+            
             # Calculate window RMS for normalization
             window_rms = np.sqrt(np.mean(window ** 2))
             if window_rms < 0.01:  # Skip silent regions
@@ -554,11 +573,8 @@ class FSKDemodulator:
             
             for freq in self.config.end_frequencies:
                 magnitude = self._goertzel(window, freq)
-                # Normalize by window length and RMS
-                if window_rms > 1e-10:
-                    normalized_mag = magnitude / (len(window) * window_rms)
-                else:
-                    normalized_mag = 0.0
+                # Normalize by window length and RMS for relative comparison
+                normalized_mag = magnitude / (len(window) * window_rms) if window_rms > 1e-10 else 0.0
                 magnitudes.append(normalized_mag)
                 
                 # Check if this frequency is present (lower threshold for multi-freq)
@@ -605,8 +621,16 @@ class FSKDemodulator:
         symbol_samples = int(
             self.config.sample_rate * self.config.symbol_duration_ms / 1000
         )
-        # Reduce skip for very short symbols to capture more energy
-        skip_fraction = 20 if self.config.symbol_duration_ms < 30 else 10
+        # Adaptive skip based on symbol duration
+        # For ultra-fast (< 25ms), skip less to capture more signal
+        # For fast (25-40ms), moderate skip
+        # For normal (> 40ms), more skip for stability
+        if self.config.symbol_duration_ms < 25:
+            skip_fraction = 30  # Skip ~3.3% on each side
+        elif self.config.symbol_duration_ms < 40:
+            skip_fraction = 20  # Skip 5% on each side
+        else:
+            skip_fraction = 10  # Skip 10% on each side
         skip = max(1, symbol_samples // skip_fraction)
         
         if self.config.num_channels == 1:
@@ -614,9 +638,17 @@ class FSKDemodulator:
             if len(samples) < symbol_samples * 2:
                 return 0, 0.0
             high_samples = samples[skip:symbol_samples - skip]
+            # Remove DC offset
+            if len(high_samples) > 0:
+                high_samples = high_samples - np.mean(high_samples)
             high_idx, high_conf = self._detect_frequency(high_samples, self._frequencies[0])
+            
             low_samples = samples[symbol_samples + skip:symbol_samples * 2 - skip]
+            # Remove DC offset
+            if len(low_samples) > 0:
+                low_samples = low_samples - np.mean(low_samples)
             low_idx, low_conf = self._detect_frequency(low_samples, self._frequencies[0])
+            
             byte_value = (high_idx << 4) | low_idx
             confidence = np.sqrt(high_conf * low_conf)
             return byte_value, confidence
@@ -626,9 +658,15 @@ class FSKDemodulator:
             if len(samples) < symbol_samples:
                 return 0, 0.0
             symbol = samples[skip:symbol_samples - skip]
+            
+            # Apply gentle high-pass filter to reduce DC offset and low-frequency noise
+            if len(symbol) > 10:
+                symbol = symbol - np.mean(symbol)
+            
             high_idx, high_conf = self._detect_frequency(symbol, self._frequencies[0])
             low_idx, low_conf = self._detect_frequency(symbol, self._frequencies[1])
             byte_value = (high_idx << 4) | low_idx
+            # Use geometric mean for combined confidence (more conservative)
             confidence = np.sqrt(high_conf * low_conf)
             return byte_value, confidence
         
@@ -637,6 +675,10 @@ class FSKDemodulator:
             if len(samples) < symbol_samples:
                 return 0, 0.0
             symbol = samples[skip:symbol_samples - skip]
+            # Remove DC offset
+            if len(symbol) > 10:
+                symbol = symbol - np.mean(symbol)
+            
             idx1, conf1 = self._detect_frequency(symbol, self._frequencies[0])
             idx2, conf2 = self._detect_frequency(symbol, self._frequencies[1])
             idx3, conf3 = self._detect_frequency(symbol, self._frequencies[2])
@@ -650,6 +692,10 @@ class FSKDemodulator:
             if len(samples) < symbol_samples:
                 return 0, 0.0
             symbol = samples[skip:symbol_samples - skip]
+            # Remove DC offset
+            if len(symbol) > 10:
+                symbol = symbol - np.mean(symbol)
+            
             idx1, conf1 = self._detect_frequency(symbol, self._frequencies[0])
             idx2, conf2 = self._detect_frequency(symbol, self._frequencies[1])
             idx3, conf3 = self._detect_frequency(symbol, self._frequencies[2])
@@ -680,10 +726,11 @@ class FSKDemodulator:
                                      for i in range(self.config.num_frequencies)])
         
         # Skip initial silence after start signal
+        # Note: start_pos should be 0 (we already trimmed to after start signal)
         pos = start_pos + int(self.config.sample_rate * self.config.silence_ms / 1000)
-        skip = max(1, metadata_symbol_samples // 10)
+        skip = max(1, metadata_symbol_samples // 15)  # Less aggressive skip for metadata
         
-        # Decode 2 metadata bytes
+        # Decode 2 metadata bytes (using fixed 35ms, 1-channel format)
         metadata_bytes = []
         for _ in range(2):
             if pos + metadata_byte_samples > len(samples):
@@ -692,18 +739,33 @@ class FSKDemodulator:
             
             # Decode high nibble
             high_samples = samples[pos + skip:pos + metadata_symbol_samples - skip]
+            # Remove DC offset
+            if len(high_samples) > 0:
+                high_samples = high_samples - np.mean(high_samples)
             high_idx, _ = self._detect_frequency(high_samples, temp_frequencies)
             
             # Decode low nibble
             low_samples = samples[pos + metadata_symbol_samples + skip:pos + metadata_byte_samples - skip]
+            # Remove DC offset
+            if len(low_samples) > 0:
+                low_samples = low_samples - np.mean(low_samples)
             low_idx, _ = self._detect_frequency(low_samples, temp_frequencies)
             
             byte_val = (high_idx << 4) | low_idx
             metadata_bytes.append(byte_val)
             pos += metadata_byte_samples
         
-        num_channels = metadata_bytes[0] if 1 <= metadata_bytes[0] <= 4 else self.config.num_channels
-        symbol_duration = metadata_bytes[1] if metadata_bytes[1] > 0 else int(self.config.symbol_duration_ms)
+        # Validate and apply sanity checks to decoded metadata
+        num_channels = metadata_bytes[0]
+        symbol_duration = metadata_bytes[1]
+        
+        # Validate channel count (1-4)
+        if not (1 <= num_channels <= 4):
+            num_channels = self.config.num_channels
+        
+        # Validate symbol duration (10-200ms range)
+        if not (10 <= symbol_duration <= 200):
+            symbol_duration = int(self.config.symbol_duration_ms)
         
         return num_channels, symbol_duration, pos
     
@@ -727,8 +789,9 @@ class FSKDemodulator:
             Tuple of (data bytes, signature bytes, confidence)
         """
         # Read metadata header if present
+        # Note: samples should already be trimmed (start signal removed, before end signal)
         if read_metadata:
-            # decode_metadata handles skipping initial silence and returns position after metadata
+            # decode_metadata expects samples starting after start signal
             detected_channels, detected_duration, pos = self.decode_metadata(samples, 0)
             # Update config with detected values
             original_channels = self.config.num_channels

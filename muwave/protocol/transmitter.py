@@ -13,6 +13,7 @@ import numpy as np
 from muwave.audio.fsk import FSKModulator, FSKConfig
 from muwave.audio.device import AudioDevice
 from muwave.core.party import Party, Message
+from muwave.utils.formats import FormatEncoder, FormatDetector, FormatMetadata
 
 
 @dataclass
@@ -147,21 +148,38 @@ class Transmitter:
             self._transmitting = True
         
         try:
+            # Detect format if not specified
+            format_meta = None
+            if message.content_format:
+                # Use message's format metadata
+                from muwave.utils.formats import ContentFormat
+                format_type = None
+                for fmt in ContentFormat:
+                    if fmt.value == message.content_format or fmt.name.lower() == message.content_format.lower():
+                        format_type = fmt
+                        break
+                if format_type:
+                    format_meta = FormatMetadata(format_type, language=message.format_language)
+            
+            # Encode content with format metadata
+            encoded_data = FormatEncoder.encode(message.content, format_meta)
+            
             # Prepare progress tracking
-            content_bytes = message.content.encode('utf-8')
-            self._progress = TransmissionProgress(total_bytes=len(content_bytes))
+            self._progress = TransmissionProgress(total_bytes=len(encoded_data))
             self._update_progress("waiting")
             
-            # Encode message
-            audio_samples = self._modulator.encode_text(
-                message.content,
+            # Encode message (use encode_data instead of encode_text to preserve binary format info)
+            audio_samples = self._modulator.encode_data(
+                encoded_data,
                 signature=self.party.signature,
                 repetitions=self._repetitions,
             )
             
             # Estimate expected duration for progress interpolation
             try:
-                self._expected_duration_s = self.estimate_duration(message.content)
+                # Account for format metadata overhead
+                effective_content = message.content if not format_meta else message.content + "XX"  # ~2 byte overhead
+                self._expected_duration_s = self.estimate_duration(effective_content)
             except Exception:
                 self._expected_duration_s = max(0.1, len(audio_samples) / self._modulator.config.sample_rate)
 

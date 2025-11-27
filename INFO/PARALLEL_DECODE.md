@@ -78,10 +78,10 @@ muwave decode output.wav --speed fast --channels 4
 
 ### Testing
 
-You can benchmark parallel performance using the CLI:
-- Compare metadata vs explicit speed paths
-- Test various thread counts with `--threads`
-- Validate correctness with test suite: `pytest tests/`
+Benchmark script available: `benchmark_parallel.sh`
+- Compares metadata vs explicit speed paths
+- Tests various thread counts
+- Validates correctness
 
 ### Future Enhancements
 
