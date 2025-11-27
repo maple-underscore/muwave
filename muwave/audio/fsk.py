@@ -556,8 +556,23 @@ class FSKDemodulator:
         )
         step_size = window_size // 4
         
-        for i in range(0, len(samples) - window_size, step_size):
+        # Make sure we don't go past the end - adjust loop to include the last possible window
+        max_start = len(samples) - window_size
+        if max_start < 0:
+            return False, len(samples)
+        
+        # Check from start to end, ensuring we check the last window
+        positions_to_check = list(range(0, max_start, step_size))
+        # Always check the last possible position if not already in the list
+        if not positions_to_check or positions_to_check[-1] != max_start:
+            positions_to_check.append(max_start)
+        
+        for i in positions_to_check:
             window = samples[i:i + window_size]
+            
+            # Skip if window is too short
+            if len(window) < window_size:
+                continue
             
             # Remove DC offset for better detection
             window = window - np.mean(window)

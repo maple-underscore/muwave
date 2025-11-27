@@ -26,6 +26,7 @@ from muwave.ui.interface import (
     ReceiveStatus,
     create_interface,
 )
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from muwave.utils.helpers import (
     get_platform,
     is_docker_available,
@@ -877,18 +878,25 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
                     text = None
                 return (speed_name, symbol_dur, text, signature, confidence, reps_local)
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_map = {executor.submit(_test_speed, ts): ts for ts in test_speeds}
-                for future in concurrent.futures.as_completed(future_map):
-                    speed_name, symbol_dur, text, signature, confidence, reps_local = future.result()
-                    ui.console.print(f"  Testing {speed_name} ({symbol_dur}ms): ", end="")
-                    if text is not None:
-                        ui.console.print(f"[green]✓[/] {confidence:.2%}")
-                        if confidence > best_confidence:
-                            best_confidence = confidence
-                            best_result = (speed_name, symbol_dur, text, signature, confidence, reps_local)
-                    else:
-                        ui.console.print(f"[red]✗[/] {confidence:.2%}")
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                console=ui.console,
+            ) as progress:
+                task = progress.add_task("[cyan]Testing speed modes...", total=len(test_speeds))
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {executor.submit(_test_speed, ts): ts for ts in test_speeds}
+                    for future in concurrent.futures.as_completed(future_map):
+                        speed_name, symbol_dur, text, signature, confidence, reps_local = future.result()
+                        if text is not None:
+                            if confidence > best_confidence:
+                                best_confidence = confidence
+                                best_result = (speed_name, symbol_dur, text, signature, confidence, reps_local)
+                                progress.update(task, description=f"[cyan]Testing speeds... [green]✓ {speed_name} ({confidence:.0%})")
+                        progress.advance(task)
             
             if best_result is None:
                 ui.print_error("Failed to decode with any speed setting")
@@ -911,13 +919,38 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
             
             ui.print_info(f"Decoding with detected settings: {num_channels} channels, {symbol_dur}ms symbols...")
             
-            demodulator = FSKDemodulator(fsk_config)
-            data, signature, confidence = demodulator.decode_data(
-                message_samples,
-                signature_length=8,
-                repetitions=reps,
-                read_metadata=True,  # Let decode_data handle metadata skipping
-            )
+            # Show progress bar while decoding
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                console=ui.console,
+            ) as progress:
+                task = progress.add_task("[cyan]Decoding message...", total=100)
+                
+                # Decode in thread to show progress
+                result = [None, None, None]
+                def decode_thread():
+                    demodulator = FSKDemodulator(fsk_config)
+                    result[0], result[1], result[2] = demodulator.decode_data(
+                        message_samples,
+                        signature_length=8,
+                        repetitions=reps,
+                        read_metadata=True,
+                    )
+                
+                thread = threading.Thread(target=decode_thread)
+                thread.start()
+                
+                while thread.is_alive():
+                    thread.join(timeout=0.05)
+                    if progress.tasks[task].percentage < 90:
+                        progress.update(task, advance=3)
+                
+                thread.join()
+                progress.update(task, completed=100)
+                data, signature, confidence = result[0], result[1], result[2]
             
             # Decode formatted content
             from muwave.utils.formats import FormatEncoder
@@ -957,12 +990,37 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
         ui.print_info(f"Decode settings: {cfg.speed.get('mode', 'medium')} speed (symbol: {symbol_dur}ms), repetitions: {reps}")
         ui.print_info("Decoding message...")
         
-        demodulator = FSKDemodulator(fsk_config)
-        data, signature, confidence = demodulator.decode_data(
-            message_samples,
-            signature_length=8,
-            repetitions=reps,
-        )
+        # Show progress bar while decoding
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=ui.console,
+        ) as progress:
+            task = progress.add_task("[cyan]Decoding message...", total=100)
+            
+            # Decode in thread to show progress
+            result = [None, None, None]
+            def decode_thread():
+                demodulator = FSKDemodulator(fsk_config)
+                result[0], result[1], result[2] = demodulator.decode_data(
+                    message_samples,
+                    signature_length=8,
+                    repetitions=reps,
+                )
+            
+            thread = threading.Thread(target=decode_thread)
+            thread.start()
+            
+            while thread.is_alive():
+                thread.join(timeout=0.05)
+                if progress.tasks[task].percentage < 90:
+                    progress.update(task, advance=3)
+            
+            thread.join()
+            progress.update(task, completed=100)
+            data, signature, confidence = result[0], result[1], result[2]
         
         # Decode formatted content
         from muwave.utils.formats import FormatEncoder
@@ -1136,11 +1194,39 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     
     # Create modulator and encode the data
     modulator = FSKModulator(fsk_config)
-    audio_samples = modulator.encode_data(
-        encoded_data,
-        signature=party.signature,
-        repetitions=reps,
-    )
+    
+    # Show progress bar while encoding
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=ui.console,
+    ) as progress:
+        task = progress.add_task("[cyan]Encoding audio...", total=100)
+        
+        # Start encoding in a separate thread to allow progress updates
+        import threading
+        result = [None]
+        def encode_thread():
+            result[0] = modulator.encode_data(
+                encoded_data,
+                signature=party.signature,
+                repetitions=reps,
+            )
+        
+        thread = threading.Thread(target=encode_thread)
+        thread.start()
+        
+        # Update progress while encoding
+        while thread.is_alive():
+            thread.join(timeout=0.05)
+            if progress.tasks[task].percentage < 90:
+                progress.update(task, advance=5)
+        
+        thread.join()
+        progress.update(task, completed=100)
+        audio_samples = result[0]
     
     # Get sample rate from config
     sample_rate = fsk_config.sample_rate
