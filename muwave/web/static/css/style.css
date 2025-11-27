@@ -300,6 +300,15 @@ textarea.form-control {
     gap: 10px;
 }
 
+.help-text {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    padding: 10px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+    border-left: 3px solid var(--accent-cyan);
+}
+
 /* Conversation Log */
 .conversation-log {
     max-height: 300px;
@@ -335,6 +344,16 @@ textarea.form-control {
 .message-error {
     background: rgba(244, 67, 54, 0.2);
     border-left: 3px solid var(--accent-red);
+}
+
+.message-received {
+    background: rgba(0, 188, 212, 0.2);
+    border-left: 3px solid var(--accent-cyan);
+}
+
+.message-system {
+    background: rgba(255, 235, 59, 0.1);
+    border-left: 3px solid var(--accent-yellow);
 }
 
 .message-role {

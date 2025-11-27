@@ -14,9 +14,10 @@ class TestFSKConfig:
         config = FSKConfig()
         
         assert config.sample_rate == 44100
-        assert config.base_frequency == 1000.0
+        assert config.base_frequency == 1800.0
         assert config.num_frequencies == 16
-        assert config.symbol_duration_ms == 50.0
+        assert config.symbol_duration_ms == 60.0
+        assert config.num_channels == 2
 
 
 class TestFSKModulator:
@@ -27,7 +28,10 @@ class TestFSKModulator:
         mod = FSKModulator()
         
         assert mod.config is not None
-        assert len(mod._frequencies) == 16
+        # One frequency table per channel
+        assert len(mod._frequencies) == mod.config.num_channels
+        for ch in range(mod.config.num_channels):
+            assert len(mod._frequencies[ch]) == mod.config.num_frequencies
     
     def test_generate_tone(self):
         """Test generating a tone."""
@@ -76,9 +80,10 @@ class TestFSKModulator:
         
         samples = mod.encode_byte(0xAB)
         
-        # Two symbols (nibbles) per byte
         symbol_samples = int(44100 * mod.config.symbol_duration_ms / 1000)
-        assert len(samples) == symbol_samples * 2
+        # For >=2 channels, both nibbles are simultaneous (1 symbol per byte)
+        expected = symbol_samples if mod.config.num_channels >= 2 else symbol_samples * 2
+        assert len(samples) == expected
     
     def test_encode_signature(self):
         """Test encoding a signature."""
@@ -88,7 +93,8 @@ class TestFSKModulator:
         samples = mod.encode_signature(signature)
         
         symbol_samples = int(44100 * mod.config.symbol_duration_ms / 1000)
-        expected_samples = len(signature) * 2 * symbol_samples
+        byte_samples = symbol_samples if mod.config.num_channels >= 2 else symbol_samples * 2
+        expected_samples = len(signature) * byte_samples
         assert len(samples) == expected_samples
     
     def test_encode_data(self):
@@ -143,7 +149,9 @@ class TestFSKDemodulator:
         demod = FSKDemodulator()
         
         assert demod.config is not None
-        assert len(demod._frequencies) == 16
+        assert len(demod._frequencies) == demod.config.num_channels
+        for ch in range(demod.config.num_channels):
+            assert len(demod._frequencies[ch]) == demod.config.num_frequencies
     
     def test_goertzel_algorithm(self):
         """Test Goertzel algorithm for frequency detection."""
@@ -166,12 +174,12 @@ class TestFSKDemodulator:
         
         # Generate tone at one of our frequencies
         target_idx = 5
-        target_freq = demod._frequencies[target_idx]
+        target_freq = demod._frequencies[0][target_idx]
         
         t = np.linspace(0, 0.05, int(44100 * 0.05), endpoint=False)
         samples = np.sin(2 * np.pi * target_freq * t).astype(np.float32) * 0.8
         
-        detected_idx, confidence = demod._detect_frequency(samples, demod._frequencies)
+        detected_idx, confidence = demod._detect_frequency(samples, demod._frequencies[0])
         
         assert detected_idx == target_idx
         assert confidence > 0.3

@@ -72,13 +72,16 @@
                     <div class="message-input">
                         <textarea id="message-text" placeholder="Type your message..." rows="3"></textarea>
                         <div class="input-actions">
-                            <button class="btn btn-primary" onclick="sendMessage()">
-                                📡 Send via Audio
+                            <button class="btn btn-primary" onclick="sendMessage(true)">
+                                🔊 Play Audio (Speakers)
                             </button>
                             <button class="btn btn-secondary" onclick="sendToAI()">
-                                🤖 Send to AI
+                                🤖 Send to AI (No Audio)
                             </button>
                         </div>
+                        <p class="help-text">
+                            💡 <strong>Play Audio:</strong> Encodes message and plays through speakers. Other parties listening via microphone will decode and respond.
+                        </p>
                     </div>
                     
                     <!-- Transmission Queue -->
@@ -153,16 +156,27 @@
             socket.emit('join_party', { party_id: PARTY_ID });
         });
         
-        function sendMessage() {
+        function sendMessage(playAudio = true) {
             const text = document.getElementById('message-text').value.trim();
             if (!text) return;
             
-            socket.emit('send_message', {
-                text: text,
-                party_id: PARTY_ID
-            });
-            
             addMessageToLog('user', text);
+            
+            fetch('/api/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    text: text,
+                    party_id: PARTY_ID,
+                    play_audio: playAudio
+                })
+            }).then(response => response.json())
+              .then(data => {
+                  if (data.status === 'playing') {
+                      addMessageToLog('system', '🔊 Playing audio through speakers...');
+                  }
+              });
+            
             document.getElementById('message-text').value = '';
         }
         
@@ -230,12 +244,41 @@
             }
         }
         
-        // Listen for messages
+                // Listen for messages
         socket.on('message_queued', function(data) {
             if (data.party_id === PARTY_ID) {
-                updateQueueStatus(data);
+                if (data.playing) {
+                    addMessageToLog('system', '🔊 Audio playing through speakers...');
+                }
             }
         });
+        
+        socket.on('party_speaking', function(data) {
+            if (data.party_id === PARTY_ID) {
+                const badge = document.getElementById('speaking-badge');
+                badge.style.display = data.is_speaking ? 'inline' : 'none';
+            }
+        });
+        
+        socket.on('message_received', function(data) {
+            if (data.party_id === PARTY_ID) {
+                addMessageToLog('received', `📡 Decoded: ${data.text} (${(data.confidence * 100).toFixed(1)}% confidence)`);
+            }
+        });
+        
+        socket.on('ai_response', function(data) {
+            if (data.party_id === PARTY_ID) {
+                addMessageToLog('assistant', data.text);
+            }
+        });
+        
+        socket.on('error', function(data) {
+            if (data.party_id === PARTY_ID) {
+                addMessageToLog('error', data.message);
+            }
+        });
+    </script>
+</html>
     </script>
 </body>
 </html>

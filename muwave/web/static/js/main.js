@@ -64,6 +64,26 @@ function initSocket() {
     socket.on('message_received', function(data) {
         showMessageNotification(data);
     });
+    
+    socket.on('transmission_progress', function(data) {
+        console.log('Transmission progress:', data);
+        // Find the last sent message and update its style during transmission
+        const messages = document.querySelectorAll('.message-sent');
+        const lastMessage = messages[messages.length - 1];
+        if (lastMessage) {
+            if (data.status === 'sending') {
+                lastMessage.style.borderLeftColor = '#00ff00';
+                lastMessage.style.backgroundColor = 'rgba(0, 255, 0, 0.05)';
+                lastMessage.style.transition = 'all 0.3s ease';
+            } else if (data.status === 'sent') {
+                lastMessage.style.borderLeftColor = '#00aa00';
+                lastMessage.style.backgroundColor = '';
+            } else if (data.status === 'error') {
+                lastMessage.style.borderLeftColor = '#ff0000';
+                lastMessage.style.backgroundColor = 'rgba(255, 0, 0, 0.05)';
+            }
+        }
+    });
 }
 
 /**

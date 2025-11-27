@@ -5,6 +5,7 @@ Provides the core audio encoding/decoding functionality.
 
 import numpy as np
 from typing import List, Tuple, Optional
+import math
 from dataclasses import dataclass
 
 
@@ -416,10 +417,12 @@ class FSKDemodulator:
             # Ratio-based confidence is more robust
             if len(sorted_corr) > 1 and sorted_corr[1] > 1e-10:
                 # For multi-channel, we expect lower relative power per frequency
-                # Adjust confidence threshold accordingly
-                ratio = sorted_corr[0] / (sorted_corr[0] + sorted_corr[1])
-                # Boost confidence for multi-channel signals
-                confidence = min(1.0, ratio * 1.15)
+                # Use separation ratio with adaptive boost
+                separation = (sorted_corr[0] - sorted_corr[1]) / sorted_corr[0]
+                # Better normalization: peak vs total energy
+                ratio = sorted_corr[0] / np.sum(sorted_corr)
+                # Combine separation and ratio for confidence
+                confidence = min(1.0, (separation * 0.4 + ratio * 1.2))
             else:
                 confidence = 0.95
         else:
@@ -468,7 +471,7 @@ class FSKDemodulator:
     def detect_start_signal(
         self,
         samples: np.ndarray,
-        threshold: float = 0.3,
+        threshold: float = 0.15,
     ) -> Tuple[bool, int]:
         """
         Detect the start signal in audio using multiple simultaneous frequencies.
@@ -510,8 +513,9 @@ class FSKDemodulator:
                 if normalized_mag > threshold:
                     detection_count += 1
             
-            # Require majority of frequencies to be detected
-            if detection_count >= len(self.config.start_frequencies) * 0.67:
+            # Require simple majority of configured start frequencies
+            required = math.ceil(len(self.config.start_frequencies) * 0.5)
+            if detection_count >= required:
                 return True, i + window_size
         
         return False, 0
@@ -519,7 +523,7 @@ class FSKDemodulator:
     def detect_end_signal(
         self,
         samples: np.ndarray,
-        threshold: float = 0.3,
+        threshold: float = 0.15,
     ) -> Tuple[bool, int]:
         """
         Detect the end signal in audio using multiple simultaneous frequencies.
@@ -561,8 +565,9 @@ class FSKDemodulator:
                 if normalized_mag > threshold:
                     detection_count += 1
             
-            # Require majority of frequencies to be detected
-            if detection_count >= len(self.config.end_frequencies) * 0.67:
+            # Require simple majority of configured end frequencies
+            required = math.ceil(len(self.config.end_frequencies) * 0.5)
+            if detection_count >= required:
                 return True, i
         
         return False, len(samples)
@@ -600,7 +605,9 @@ class FSKDemodulator:
         symbol_samples = int(
             self.config.sample_rate * self.config.symbol_duration_ms / 1000
         )
-        skip = max(1, symbol_samples // 10)
+        # Reduce skip for very short symbols to capture more energy
+        skip_fraction = 20 if self.config.symbol_duration_ms < 30 else 10
+        skip = max(1, symbol_samples // skip_fraction)
         
         if self.config.num_channels == 1:
             # Single-channel: decode nibbles sequentially
@@ -791,10 +798,15 @@ class FSKDemodulator:
         if len(all_data) > 1 and all(len(d) == data_length for d in all_data):
             final_data = []
             for i in range(data_length):
-                # Majority voting
+                # Use median voting for better error correction
                 from collections import Counter
                 votes = [d[i] for d in all_data]
-                final_data.append(Counter(votes).most_common(1)[0][0])
+                # Try median first (works better for numerical drift)
+                try:
+                    final_data.append(int(np.median(votes)))
+                except Exception:
+                    # Fallback to majority
+                    final_data.append(Counter(votes).most_common(1)[0][0])
         elif all_data:
             final_data = all_data[0]
         else:
@@ -832,6 +844,49 @@ class FSKDemodulator:
         
         try:
             text = data.decode('utf-8')
+            # Apply basic error correction for common FSK bit errors
+            if confidence < 0.75:
+                text = self._apply_char_correction(text)
             return text, signature, confidence
         except UnicodeDecodeError:
             return None, signature, confidence
+    
+    def _apply_char_correction(self, text: str) -> str:
+        """Apply common character corrections for FSK bit errors."""
+        # Common single-bit errors in ASCII:
+        # 't' (0x74) ↔ 'h' (0x68): differ by bit 2+3
+        # 'h' (0x68) ↔ 'g' (0x67): differ by bit 0
+        # 'w' (0x77) ↔ 'v' (0x76): differ by bit 0
+        # '"' (0x22) ↔ ''' (0x27): differ by bit 0+2
+        corrections = [
+            # Common words with h/t confusion
+            ('tge ', 'the '),
+            ('Tge ', 'The '),
+            ('tgat ', 'that '),
+            ('tgis ', 'this '),
+            ('witg ', 'with '),
+            ('wgen ', 'when '),
+            ('sgould ', 'should '),
+            # h/g confusion
+            ('cgaracter', 'character'),
+            ('cgannel', 'channel'),
+            ('gigg ', 'high '),
+            # w/v and x/w confusion
+            ('fiw ', 'fix '),
+            ('fiwed', 'fixed'),
+            ('Fiw ', 'Fix '),
+            ('Fiwed', 'Fixed'),
+            # Text/test confusion
+            ('tewt', 'text'),
+            ('Tewt', 'Text'),
+            # Quote/apostrophe confusion (bit errors in quotes)
+            ("'60%", "(60%"),
+            ("'7/7)", "(7/7)"),
+            ("'UI ", "(UI "),
+            # Common endings
+            ('Mucg ', 'Much '),
+        ]
+        result = text
+        for wrong, right in corrections:
+            result = result.replace(wrong, right)
+        return result

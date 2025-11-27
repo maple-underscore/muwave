@@ -1,0 +1,4 @@
+include INFO/*.md
+include config.yaml
+include pyproject.toml
+recursive-include muwave *.py

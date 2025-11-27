@@ -59,6 +59,7 @@ class Config:
                 "sample_rate": 44100,
                 "buffer_size": 1024,
                 "volume": 0.8,
+                "input_gain": 1.0,
                 "input_device": None,
                 "output_device": None,
             },

@@ -185,8 +185,15 @@ class MuwaveApp:
     
     def _on_message_received(self, message: Message, is_own: bool) -> None:
         """Handle received message."""
+        # If it's our own signature while we're currently transmitting, ignore
+        # to prevent echo/duplicates. But allow showing "self" messages when
+        # not actively transmitting (e.g., playing back a test file locally).
         if is_own:
-            return  # Ignore own transmissions
+            try:
+                if self._get_transmitter().is_transmitting():
+                    return
+            except Exception:
+                return
         
         self.logger.log_message_received(
             self.party.party_id,
@@ -275,6 +282,33 @@ class MuwaveApp:
         if self._receiver:
             self._receiver.stop_listening()
         self.ui.print_info("Stopped listening")
+
+    def monitor_input(self, duration: float = 5.0) -> None:
+        """Monitor input RMS levels for a short duration to verify device selection."""
+        import numpy as np
+        receiver = self._get_receiver()
+        device = receiver._audio_device
+        self.ui.print_info(f"Monitoring input for {duration:.1f}s (device: {device.input_device})…")
+        samples = device.record(duration_seconds=duration)  # blocking
+        if samples is None or len(samples) == 0:
+            self.ui.print_warning("No samples captured. Check input device.")
+            return
+        arr = np.asarray(samples, dtype=np.float32)
+        rms = float(np.sqrt(np.mean(arr ** 2)))
+        peak = float(np.max(np.abs(arr)))
+        eff_rms = rms * float(getattr(receiver, "_input_gain", 1.0))
+        self.ui.print_info(f"Input RMS: {rms:.4f}, Peak: {peak:.4f} (effective RMS with gain: {eff_rms:.4f})")
+        if rms < 0.01:
+            self.ui.print_warning("Very low level. Consider selecting a loopback device and/or increasing input_gain.")
+
+    def set_input_gain(self, gain: float) -> None:
+        """Set input gain at runtime for the receiver."""
+        try:
+            receiver = self._get_receiver()
+            receiver._input_gain = float(gain)
+            self.ui.print_success(f"Set input_gain to {gain}")
+        except Exception as e:
+            self.ui.print_error(f"Failed to set input_gain: {e}")
     
     def run_interactive(self) -> None:
         """Run interactive mode."""
@@ -355,6 +389,68 @@ class MuwaveApp:
         
         elif command == "/help":
             self.ui.show_help()
+        
+        elif command == "/monitor":
+            # Monitor input for 5 seconds
+            self.monitor_input(5.0)
+        
+        elif command == "/devices":
+            try:
+                from muwave.audio.device import AudioDevice
+                devices = AudioDevice.list_devices()
+                if not devices:
+                    self.ui.print_warning("No audio devices found or sounddevice unavailable.")
+                else:
+                    self.ui.console.print("\n[bold]Available audio devices:[/]")
+                    for d in devices:
+                        ins = d['inputs']
+                        outs = d['outputs']
+                        sr = int(d['default_samplerate'])
+                        self.ui.console.print(f"  [{d['index']}] {d['name']}  ({ins} in, {outs} out, {sr} Hz)")
+                    self.ui.console.print()
+                    from muwave.audio.device import AudioDevice as AD
+                    self.ui.print_info(f"Default input: {AD.get_default_input()}  Default output: {AD.get_default_output()}")
+            except Exception as e:
+                self.ui.print_error(f"Failed to list devices: {e}")
+        
+        elif command == "/gain":
+            try:
+                val = float(args)
+            except (TypeError, ValueError):
+                self.ui.print_error("Usage: /gain <float>, e.g., /gain 2.0")
+                return
+            self.set_input_gain(val)
+
+        elif command == "/usein":
+            try:
+                idx = int(args)
+            except (TypeError, ValueError):
+                self.ui.print_error("Usage: /usein <device_index>")
+                return
+            try:
+                receiver = self._get_receiver()
+                was_listening = receiver.is_listening()
+                if was_listening:
+                    receiver.stop_listening()
+                receiver._audio_device.input_device = idx
+                self.ui.print_success(f"Set input_device to {idx}")
+                if was_listening:
+                    receiver.start_listening()
+            except Exception as e:
+                self.ui.print_error(f"Failed to set input device: {e}")
+
+        elif command == "/inject":
+            path = args.strip()
+            if not path:
+                self.ui.print_error("Usage: /inject <wav_path>")
+                return
+            try:
+                receiver = self._get_receiver()
+                self.ui.print_info(f"Injecting WAV file: {path}")
+                receiver.inject_wav_file(path)
+                self.ui.print_success("Injected samples. If listening, decoding will trigger shortly.")
+            except Exception as e:
+                self.ui.print_error(f"Failed to inject: {e}")
         
         elif command == "/quit" or command == "/exit":
             self._running = False
@@ -870,26 +966,40 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
 @click.option('--repetitions', type=int, default=None, help='Number of repetitions (overrides redundancy mode)')
 @click.option('--volume', '-v', type=float, default=None, help='Audio volume (0.0 to 1.0)')
 @click.option('--channels', type=click.Choice(['1', '2', '3', '4'], case_sensitive=False), default=None, help='Number of frequency channels (1=mono, 2=dual, 3=tri, 4=quad). Higher=faster but less accurate.')
+@click.option('--file', '-f', is_flag=True, help='Treat PROMPT as a file path and encode its contents')
 def generate(prompt: str, output: str, config: Optional[str], name: Optional[str], 
              speed: Optional[str], redundancy: Optional[str], 
              symbol_duration: Optional[float], repetitions: Optional[int],
-             volume: Optional[float], channels: Optional[str]):
-    """Generate a sound wave from a prompt and save it to a WAV file.
+             volume: Optional[float], channels: Optional[str], file: bool):
+    """Generate a sound wave from a prompt or file and save it to a WAV file.
     
-    This command takes a text prompt, converts it to an audio signal using
-    FSK modulation, and saves it as a WAV file that can be downloaded and played.
+    This command takes a text prompt (or file with --file), converts it to an audio 
+    signal using FSK modulation, and saves it as a WAV file.
     
     Examples:
         muwave generate "Hello, World!" -o hello.wav
+        muwave generate message.txt --file -o message.wav
         muwave generate "Test message" -o test.wav --speed fast --redundancy high
-        muwave generate "Quick" -o quick.wav --symbol-duration 25 --repetitions 3
-        muwave generate "Loud" -o loud.wav --volume 1.0
+        muwave generate script.txt -f --symbol-duration 25 --repetitions 3
     """
     # Load configuration
     try:
         cfg = Config(config) if config else Config()
     except FileNotFoundError:
         cfg = Config()
+    
+    # Read from file if --file flag is set
+    text_to_encode = prompt
+    if file:
+        try:
+            with open(prompt, 'r', encoding='utf-8') as f:
+                text_to_encode = f.read()
+        except FileNotFoundError:
+            click.echo(f"Error: File not found: {prompt}")
+            return
+        except Exception as e:
+            click.echo(f"Error reading file: {e}")
+            return
     
     # Create party for signature
     party = Party(
@@ -901,7 +1011,10 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     # Create UI for output
     ui = create_interface(cfg.ui)
     ui.print_header()
-    ui.print_info(f"Generating sound wave for: {prompt}")
+    if file:
+        ui.print_info(f"Encoding file: {prompt} ({len(text_to_encode)} chars)")
+    else:
+        ui.print_info(f"Generating sound wave for: {text_to_encode}")
     
     # Override speed mode if specified
     if speed:
@@ -948,7 +1061,7 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     # Create modulator and encode the text
     modulator = FSKModulator(fsk_config)
     audio_samples = modulator.encode_text(
-        prompt,
+        text_to_encode,
         signature=party.signature,
         repetitions=reps,
     )
@@ -994,6 +1107,7 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
     ui.console.print()
     ui.console.print("[bold cyan]Debug Info:[/]")
     ui.console.print(f"  Signature: {party.signature.hex()}")
+    ui.console.print(f"  Text length: {len(text_to_encode)} chars, {len(text_to_encode.encode('utf-8'))} bytes")
     ui.console.print(f"  Start signal ends at: {start_pos}")
     ui.console.print(f"  Data region: {data_start_pos} - {end_start_pos}")
     ui.console.print(f"  End signal starts at: {end_start_pos}")

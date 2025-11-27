@@ -70,21 +70,25 @@ class Transmitter:
         # Set up FSK configuration
         fsk_config = FSKConfig(
             sample_rate=self._config.get("sample_rate", 44100),
-            base_frequency=self._config.get("base_frequency", 1000),
-            frequency_step=self._config.get("frequency_step", 100),
+            base_frequency=self._config.get("base_frequency", 1800),
+            frequency_step=self._config.get("frequency_step", 120),
             num_frequencies=self._config.get("num_frequencies", 16),
-            symbol_duration_ms=self._config.get("symbol_duration_ms", 50),
-            start_frequency=self._config.get("start_frequency", 500),
-            end_frequency=self._config.get("end_frequency", 600),
-            signal_duration_ms=self._config.get("signal_duration_ms", 200),
+            symbol_duration_ms=self._config.get("symbol_duration_ms", 60),
+            start_frequencies=self._config.get("start_frequencies", [800, 1000, 1200, 1400, 1600, 1800, 2000]),
+            end_frequencies=self._config.get("end_frequencies", [900, 1100, 1300, 1500, 1700, 1900, 2100]),
+            signal_duration_ms=self._config.get("signal_duration_ms", 500),
             silence_ms=self._config.get("silence_ms", 50),
             volume=self._config.get("volume", 0.8),
+            num_channels=self._config.get("num_channels", 2),
+            channel_spacing=self._config.get("channel_spacing", 1600),
         )
         
         self._modulator = FSKModulator(fsk_config)
         self._audio_device = audio_device or AudioDevice(
             sample_rate=fsk_config.sample_rate,
             buffer_size=self._config.get("buffer_size", 1024),
+            input_device=self._config.get("input_device"),
+            output_device=self._config.get("output_device"),
         )
         
         self._repetitions = self._config.get("repetitions", 1)
@@ -92,6 +96,9 @@ class Transmitter:
         self._progress_callback: Optional[Callable[[TransmissionProgress], None]] = None
         self._transmitting = False
         self._lock = threading.Lock()
+        self._progress_thread: Optional[threading.Thread] = None
+        self._progress_stop = threading.Event()
+        self._expected_duration_s: float = 0.0
     
     def set_progress_callback(
         self,
@@ -152,14 +159,47 @@ class Transmitter:
                 repetitions=self._repetitions,
             )
             
+            # Estimate expected duration for progress interpolation
+            try:
+                self._expected_duration_s = self.estimate_duration(message.content)
+            except Exception:
+                self._expected_duration_s = max(0.1, len(audio_samples) / self._modulator.config.sample_rate)
+
             self._update_progress("sending")
+
+            # Start background progress updater to interpolate during playback
+            def progress_updater():
+                total_bytes = max(1, self._progress.total_bytes)
+                start_time = time.time()
+                while not self._progress_stop.is_set() and self._transmitting:
+                    elapsed = time.time() - start_time
+                    if self._expected_duration_s > 0:
+                        frac = min(0.99, max(0.0, elapsed / self._expected_duration_s))
+                    else:
+                        frac = 0.0
+                    sent_est = int(total_bytes * frac)
+                    if sent_est != self._progress.sent_bytes:
+                        self._update_progress("sending", sent_bytes=sent_est)
+                    time.sleep(0.1)
             
             def on_complete():
+                # Stop progress updater and finalize
+                self._progress_stop.set()
+                if self._progress_thread and self._progress_thread.is_alive():
+                    try:
+                        self._progress_thread.join(timeout=0.5)
+                    except Exception:
+                        pass
                 self._update_progress("sent", len(content_bytes))
                 self.party.mark_transmitted(message)
                 self._transmitting = False
             
             # Play audio
+            # Launch progress updater thread after playback starts
+            self._progress_stop.clear()
+            self._progress_thread = threading.Thread(target=progress_updater, daemon=True)
+            self._progress_thread.start()
+
             if blocking:
                 self._audio_device.play(audio_samples, blocking=True)
                 on_complete()
@@ -173,6 +213,7 @@ class Transmitter:
             return True
             
         except Exception as e:
+            self._progress_stop.set()
             self._update_progress("error", error=str(e))
             self._transmitting = False
             return False

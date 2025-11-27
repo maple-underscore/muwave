@@ -547,17 +547,13 @@ class MuwaveWebServer:
             data = request.json
             text = data.get('text', '')
             party_id = data.get('party_id')
+            play_audio = data.get('play_audio', False)
             
             if not text:
                 return jsonify({"error": "No text provided"}), 400
             
             if party_id and party_id in self._parties:
                 party_state = self._parties[party_id]
-                self.audio_processor.queue_transmission(
-                    text,
-                    party_id,
-                    party_state.party.signature,
-                )
                 
                 # Add to history
                 party_state.message_history.append({
@@ -567,13 +563,25 @@ class MuwaveWebServer:
                     "party_id": party_id,
                 })
                 
+                if play_audio:
+                    # Generate and play audio through speakers
+                    self._play_audio_message(text, party_id, party_state)
+                else:
+                    # Just queue for later
+                    self.audio_processor.queue_transmission(
+                        text,
+                        party_id,
+                        party_state.party.signature,
+                    )
+                
                 # Emit via socket
                 self.socketio.emit('message_queued', {
                     "text": text,
                     "party_id": party_id,
+                    "playing": play_audio,
                 })
             
-            return jsonify({"status": "queued"})
+            return jsonify({"status": "queued" if not play_audio else "playing"})
         
         @self.app.route('/api/ai', methods=['POST'])
         def api_ai():
@@ -733,6 +741,10 @@ class MuwaveWebServer:
                 base_frequency,
             )
             
+            # Start listening thread for this party
+            if self._running:
+                self._start_listening_for_party(party.party_id, state)
+            
             return party.party_id
     
     def remove_party(self, party_id: str) -> None:
@@ -740,6 +752,184 @@ class MuwaveWebServer:
         with self._party_lock:
             if party_id in self._parties:
                 del self._parties[party_id]
+    
+    def _play_audio_message(self, text: str, party_id: str, party_state: PartyState) -> None:
+        """
+        Generate and play audio message through speakers.
+        
+        Args:
+            text: Message text to encode
+            party_id: ID of sending party
+            party_state: State of the party
+        """
+        from muwave.protocol.transmitter import Transmitter
+        from muwave.audio.device import AudioDevice
+        
+        def play_in_thread():
+            try:
+                logger.info(f"[Audio] Starting playback for party {party_id}: '{text}'")
+                
+                # Mark as speaking
+                party_state.is_speaking = True
+                self.socketio.emit('party_speaking', {
+                    'party_id': party_id,
+                    'is_speaking': True,
+                })
+                
+                # Create transmitter with protocol config
+                protocol_config = self.config.to_protocol_config()
+                logger.info(f"[Audio] Protocol config: sample_rate={protocol_config.get('sample_rate', 44100)}")
+                
+                audio_device = AudioDevice(
+                    sample_rate=protocol_config.get('sample_rate', 44100),
+                )
+                transmitter = Transmitter(
+                    party=party_state.party,
+                    config=protocol_config,
+                    audio_device=audio_device,
+                )
+                
+                # Set progress callback to emit WebSocket updates
+                def on_progress(progress):
+                    self.socketio.emit('transmission_progress', {
+                        'party_id': party_id,
+                        'status': progress.status,
+                        'progress_percent': progress.progress_percent,
+                        'text': text,
+                    })
+                
+                transmitter.set_progress_callback(on_progress)
+                
+                # Transmit the message (plays audio)
+                logger.info(f"[Audio] Transmitting audio...")
+                transmitter.transmit_text(text, blocking=True)
+                logger.info(f"[Audio] Transmission complete")
+                
+            except Exception as e:
+                logger.error(f"[Audio] Playback failed: {e}", exc_info=True)
+                self.socketio.emit('error', {
+                    'party_id': party_id,
+                    'message': str(e),
+                })
+            finally:
+                # Mark as not speaking
+                party_state.is_speaking = False
+                self.socketio.emit('party_speaking', {
+                    'party_id': party_id,
+                    'is_speaking': False,
+                })
+        
+        logger.info(f"[Audio] Starting playback thread for party {party_id}")
+        # Play in background thread
+        thread = threading.Thread(target=play_in_thread, daemon=True)
+        thread.start()
+    
+    def _start_listening_for_party(self, party_id: str, party_state: PartyState) -> None:
+        """
+        Start continuous listening thread for a party.
+        
+        Args:
+            party_id: ID of the party
+            party_state: State of the party
+        """
+        from muwave.protocol.receiver import Receiver
+        from muwave.audio.device import AudioDevice
+        
+        def listen_loop():
+            try:
+                # Create receiver with protocol config
+                protocol_config = self.config.to_protocol_config()
+                audio_device = AudioDevice(
+                    sample_rate=protocol_config.get('sample_rate', 44100),
+                )
+                receiver = Receiver(
+                    party=party_state.party,
+                    config=protocol_config,
+                    audio_device=audio_device,
+                )
+                
+                while party_state.is_listening and self._running:
+                    # Listen for messages (blocks for timeout duration)
+                    message = receiver.listen(timeout=5.0)
+                    
+                    if message:
+                        # Add to history
+                        party_state.message_history.append({
+                            "role": "received",
+                            "content": message.text,
+                            "timestamp": time.time(),
+                            "from_party": message.sender_signature.hex() if message.sender_signature else "unknown",
+                            "confidence": message.confidence,
+                        })
+                        
+                        # Emit received message
+                        self.socketio.emit('message_received', {
+                            'party_id': party_id,
+                            'text': message.text,
+                            'confidence': message.confidence,
+                            'from_signature': message.sender_signature.hex() if message.sender_signature else None,
+                        })
+                        
+                        # Auto-respond if AI party
+                        if party_state.party.is_ai:
+                            self._handle_ai_response(party_id, party_state, message.text)
+                    
+                    time.sleep(0.1)
+                    
+            except Exception as e:
+                self.socketio.emit('error', {
+                    'party_id': party_id,
+                    'message': f"Listening error: {str(e)}",
+                })
+        
+        # Start listening thread
+        thread = threading.Thread(target=listen_loop, daemon=True)
+        thread.start()
+    
+    def _handle_ai_response(self, party_id: str, party_state: PartyState, prompt: str) -> None:
+        """
+        Handle AI response to received message.
+        
+        Args:
+            party_id: ID of the party
+            party_state: State of the party
+            prompt: Received message text
+        """
+        def respond_in_thread():
+            try:
+                ollama = self._get_ollama()
+                if not ollama.is_available():
+                    return
+                
+                # Generate AI response
+                response = ollama.chat(prompt)
+                
+                # Add to history
+                party_state.message_history.append({
+                    "role": "assistant",
+                    "content": response,
+                    "timestamp": time.time(),
+                })
+                
+                # Emit AI response
+                self.socketio.emit('ai_response', {
+                    'party_id': party_id,
+                    'text': response,
+                })
+                
+                # Play response audio
+                time.sleep(1.0)  # Brief delay before responding
+                self._play_audio_message(response, party_id, party_state)
+                
+            except Exception as e:
+                self.socketio.emit('error', {
+                    'party_id': party_id,
+                    'message': f"AI error: {str(e)}",
+                })
+        
+        # Respond in background thread
+        thread = threading.Thread(target=respond_in_thread, daemon=True)
+        thread.start()
     
     def _broadcast_updates(self) -> None:
         """Broadcast periodic updates to all clients."""
@@ -777,6 +967,12 @@ class MuwaveWebServer:
         
         # Start system monitor
         self.system_monitor.start()
+        
+        # Start listening threads for all parties
+        with self._party_lock:
+            for party_id, party_state in self._parties.items():
+                if party_state.is_listening:
+                    self._start_listening_for_party(party_id, party_state)
         
         # Start update thread
         self._update_thread = threading.Thread(

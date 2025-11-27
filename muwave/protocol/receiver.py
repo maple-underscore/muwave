@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 import numpy as np
+from scipy.io import wavfile
+from scipy import signal as scipy_signal
 
 from muwave.audio.fsk import FSKDemodulator, FSKConfig
 from muwave.audio.device import AudioDevice, AudioBuffer
@@ -73,25 +75,30 @@ class Receiver:
         # Set up FSK configuration
         fsk_config = FSKConfig(
             sample_rate=self._config.get("sample_rate", 44100),
-            base_frequency=self._config.get("base_frequency", 1000),
-            frequency_step=self._config.get("frequency_step", 100),
+            base_frequency=self._config.get("base_frequency", 1800),
+            frequency_step=self._config.get("frequency_step", 120),
             num_frequencies=self._config.get("num_frequencies", 16),
-            symbol_duration_ms=self._config.get("symbol_duration_ms", 50),
-            start_frequency=self._config.get("start_frequency", 500),
-            end_frequency=self._config.get("end_frequency", 600),
-            signal_duration_ms=self._config.get("signal_duration_ms", 200),
+            symbol_duration_ms=self._config.get("symbol_duration_ms", 60),
+            start_frequencies=self._config.get("start_frequencies", [800, 1000, 1200, 1400, 1600, 1800, 2000]),
+            end_frequencies=self._config.get("end_frequencies", [900, 1100, 1300, 1500, 1700, 1900, 2100]),
+            signal_duration_ms=self._config.get("signal_duration_ms", 500),
             silence_ms=self._config.get("silence_ms", 50),
             volume=self._config.get("volume", 0.8),
+            num_channels=self._config.get("num_channels", 2),
+            channel_spacing=self._config.get("channel_spacing", 1600),
         )
         
         self._demodulator = FSKDemodulator(fsk_config)
         self._audio_device = audio_device or AudioDevice(
             sample_rate=fsk_config.sample_rate,
             buffer_size=self._config.get("buffer_size", 1024),
+            input_device=self._config.get("input_device"),
+            output_device=self._config.get("output_device"),
         )
         
         self._repetitions = self._config.get("repetitions", 1)
         self._self_recognition = self._config.get("self_recognition", True)
+        self._input_gain = float(self._config.get("input_gain", 1.0))
         
         self._buffer = AudioBuffer(
             max_duration_seconds=60.0,
@@ -148,16 +155,71 @@ class Receiver:
     
     def _on_audio_buffer(self, samples: np.ndarray) -> None:
         """Handle incoming audio buffer."""
+        try:
+            if self._input_gain != 1.0:
+                samples = np.asarray(samples, dtype=np.float32) * self._input_gain
+        except Exception:
+            pass
         self._buffer.add(samples)
+
+    def inject_samples(self, samples: np.ndarray, sample_rate: Optional[int] = None) -> None:
+        """Inject samples directly into the receiver buffer, resampling if needed."""
+        arr = np.asarray(samples, dtype=np.float32).flatten()
+        target_sr = int(self._demodulator.config.sample_rate)
+        if sample_rate is not None and int(sample_rate) != target_sr:
+            try:
+                # Polyphase resampling for quality
+                from math import gcd
+                g = gcd(int(sample_rate), target_sr)
+                up = target_sr // g
+                down = int(sample_rate) // g
+                arr = scipy_signal.resample_poly(arr, up, down).astype(np.float32)
+            except Exception:
+                # Fallback to linear interpolation
+                old_n = len(arr)
+                new_n = int(old_n * (target_sr / float(sample_rate)))
+                x_old = np.linspace(0.0, 1.0, num=old_n, endpoint=False)
+                x_new = np.linspace(0.0, 1.0, num=new_n, endpoint=False)
+                arr = np.interp(x_new, x_old, arr).astype(np.float32)
+        # Apply input gain similar to live path
+        try:
+            if self._input_gain != 1.0:
+                arr = arr * self._input_gain
+        except Exception:
+            pass
+        self._buffer.add(arr)
+
+    def inject_wav_file(self, path: str) -> None:
+        """Read a WAV file and inject its samples into the buffer for decoding."""
+        sr, data = wavfile.read(path)
+        if data.dtype == np.int16:
+            arr = data.astype(np.float32) / 32767.0
+        elif data.dtype == np.int32:
+            arr = data.astype(np.float32) / 2147483647.0
+        elif data.dtype == np.uint8:
+            arr = (data.astype(np.float32) - 128) / 128.0
+        else:
+            arr = data.astype(np.float32)
+        if arr.ndim > 1:
+            arr = arr[:, 0]
+        self.inject_samples(arr, sample_rate=sr)
     
     def _process_buffer(self) -> None:
         """Process audio buffer to detect and decode messages."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         while not self._stop_event.is_set():
             if self._buffer.num_samples < 1000:
                 time.sleep(0.05)
                 continue
             
             samples = self._buffer.get_all()
+            
+            # Log buffer stats periodically
+            if int(time.time() * 2) % 10 == 0:  # Every ~5 seconds
+                max_amplitude = np.max(np.abs(samples)) if len(samples) > 0 else 0
+                logger.debug(f"[Receiver] Buffer: {len(samples)} samples, max amplitude: {max_amplitude:.4f}")
             
             # Try to detect start signal
             detected, start_pos = self._demodulator.detect_start_signal(samples)
@@ -195,14 +257,17 @@ class Receiver:
                     message_samples = data_samples[:end_pos]
                     self._update_progress(ReceiverState.DECODING)
                     
-                    # Decode the message
+                    # Decode the message (always read metadata for auto-detection)
                     text, signature, confidence = self._demodulator.decode_text(
                         message_samples,
                         signature_length=8,
                         repetitions=self._repetitions,
+                        read_metadata=True,
                     )
                     
-                    if text is not None and confidence > 0.3:
+                    logger.info(f"[Receiver] Decoded: text={text}, confidence={confidence:.2f}")
+                    
+                    if text is not None and confidence > 0.2:
                         # Check if it's our own transmission
                         is_own = False
                         sender_sig = None

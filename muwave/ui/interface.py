@@ -359,6 +359,11 @@ class RichInterface:
   /clear           Clear conversation
   /status          Show current status
   /config          Show configuration
+  /devices         List audio devices
+  /usein <idx>     Set input device
+  /gain <float>    Set input gain (e.g., /gain 2.0)
+  /monitor         Monitor input RMS for 5s
+  /inject <wav>    Inject WAV file for decoding (no hardware needed)
   /help            Show this help
   /quit            Exit the application
 
