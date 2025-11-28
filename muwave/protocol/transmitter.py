@@ -175,12 +175,11 @@ class Transmitter:
                 repetitions=self._repetitions,
             )
             
-            # Estimate expected duration for progress interpolation
+            # Estimate expected duration for progress interpolation based on actual samples
             try:
-                # Account for format metadata overhead
-                effective_content = message.content if not format_meta else message.content + "XX"  # ~2 byte overhead
-                self._expected_duration_s = self.estimate_duration(effective_content)
+                self._expected_duration_s = max(0.001, len(audio_samples) / float(self._modulator.config.sample_rate))
             except Exception:
+                # Fallback (very conservative)
                 self._expected_duration_s = max(0.1, len(audio_samples) / self._modulator.config.sample_rate)
 
             self._update_progress("sending")
@@ -192,7 +191,8 @@ class Transmitter:
                 while not self._progress_stop.is_set() and self._transmitting:
                     elapsed = time.time() - start_time
                     if self._expected_duration_s > 0:
-                        frac = min(0.99, max(0.0, elapsed / self._expected_duration_s))
+                        # Allow reaching 100% based on actual expected duration
+                        frac = min(1.0, max(0.0, elapsed / self._expected_duration_s))
                     else:
                         frac = 0.0
                     sent_est = int(total_bytes * frac)
@@ -208,7 +208,8 @@ class Transmitter:
                         self._progress_thread.join(timeout=0.5)
                     except Exception:
                         pass
-                self._update_progress("sent", len(content_bytes))
+                # content_bytes was not defined here; use tracked total_bytes instead
+                self._update_progress("sent", self._progress.total_bytes)
                 self.party.mark_transmitted(message)
                 self._transmitting = False
             

@@ -9,12 +9,12 @@ from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 from enum import Enum
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.layout import Layout
 from rich.style import Style
 
@@ -100,6 +100,30 @@ class RichInterface:
         self._receive_status = ReceiveStatus.IDLE
         
         self._messages: List[Dict[str, Any]] = []
+        # Persistent progress widget and transmission tracking
+        self._progress_widget: Optional[Progress] = None
+        self._progress_task_id: Optional[int] = None
+        self._tx_prev_time: Optional[float] = None
+        self._tx_prev_sent: int = 0
+        self._tx_rate_ema: float = 0.0
+        self._tx_active_text: Optional[str] = None
+        self._tx_start_time: Optional[float] = None
+
+    def _fmt_seconds(self, seconds: Optional[float]) -> str:
+        """Format seconds as MM:SS; returns --:-- if None or invalid."""
+        if seconds is None or seconds != seconds or seconds < 0:
+            return "--:--"
+        total = int(round(seconds))
+        m, s = divmod(total, 60)
+        return f"{m:02d}:{s:02d}"
+
+    def _make_progress_bar(self, progress: float, width: int = 40) -> Text:
+        """Create a simple textual progress bar (no new lines printed)."""
+        pct = max(0.0, min(1.0, float(progress)))
+        done = int(pct * width)
+        remaining = width - done
+        bar = f"[{'#' * done}{'-' * remaining}] {int(pct * 100):3d}%"
+        return Text(bar, style=self.colors.sending)
     
     def _get_status_color(self, status: TransmitStatus) -> str:
         """Get color for transmit status."""
@@ -195,8 +219,8 @@ class RichInterface:
         total_chars = len(text)
         sent_chars = int(total_chars * progress)
         
-        # Calculate sending chunk (about 10% of text or min 1 char)
-        sending_chars = max(1, int(total_chars * 0.1))
+        # Calculate sending chunk (smaller window ~3% of text or min 1 char)
+        sending_chars = max(1, int(total_chars * 0.03))
         if sent_chars + sending_chars > total_chars:
             sending_chars = total_chars - sent_chars
         
@@ -205,34 +229,140 @@ class RichInterface:
             sending_chars = 0
         
         colored_text = self.create_transmit_text(text, sent_chars, sending_chars)
-        
-        self.console.clear()
-        self.print_header()
-        self.console.print()
-        
+
+        # Reset tracking if new transmission text or terminal state
+        if self._tx_active_text != text or status in (TransmitStatus.SENT, TransmitStatus.ERROR, TransmitStatus.WAITING and sent_chars == 0):
+            self._tx_prev_time = None
+            self._tx_prev_sent = 0
+            self._tx_rate_ema = 0.0
+            self._tx_start_time = None
+            if status in (TransmitStatus.SENT, TransmitStatus.ERROR):
+                self._tx_active_text = None
+            else:
+                self._tx_active_text = text
+
+        # Update EMA rate for ETA calculation
+        now = time.time()
+        if status == TransmitStatus.SENDING:
+            if self._tx_start_time is None:
+                self._tx_start_time = now
+            if self._tx_prev_time is not None and sent_chars >= self._tx_prev_sent:
+                dt = max(1e-6, now - self._tx_prev_time)
+                dchars = sent_chars - self._tx_prev_sent
+                inst_rate = dchars / dt
+                alpha = 0.3  # smoothing factor
+                self._tx_rate_ema = (1 - alpha) * self._tx_rate_ema + alpha * inst_rate if self._tx_rate_ema > 0 else inst_rate
+            self._tx_prev_time = now
+            self._tx_prev_sent = sent_chars
+        elif status in (TransmitStatus.SENT, TransmitStatus.ERROR):
+            self._tx_rate_ema = 0.0
+            self._tx_prev_time = None
+        elapsed_s = 0.0 if self._tx_start_time is None else max(0.0, now - self._tx_start_time)
+
         status_label = {
             TransmitStatus.WAITING: "⏳ Waiting",
             TransmitStatus.SENDING: "📡 Sending",
             TransmitStatus.SENT: "✓ Sent",
             TransmitStatus.ERROR: "✗ Error",
         }.get(status, "Unknown")
-        
-        self.console.print(Panel(
-            colored_text,
+
+        # Ensure persistent rich Progress with desired columns
+        if self.show_progress:
+            if self._progress_widget is None:
+                self._progress_widget = Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("{task.percentage:>3.0f}%"),
+                    TextColumn(" {task.completed}/{task.total}"),
+                    TextColumn(" {task.fields[time_pair]}"),
+                )
+                self._progress_task_id = self._progress_widget.add_task("Transmitting...", total=max(1, total_chars))
+            else:
+                # If total changes (new text), recreate task
+                if self._tx_active_text != text and self._progress_task_id is not None:
+                    try:
+                        # remove old task by recreating the Progress
+                        self._progress_widget = Progress(
+                            SpinnerColumn(),
+                            TextColumn("[progress.description]{task.description}"),
+                            BarColumn(),
+                            TextColumn("{task.percentage:>3.0f}%"),
+                            TextColumn(" {task.completed}/{task.total}"),
+                            TextColumn(" {task.fields[time_pair]}"),
+                        )
+                        self._progress_task_id = self._progress_widget.add_task("Transmitting...", total=max(1, total_chars))
+                    except Exception:
+                        pass
+            # Update task progress
+            if self._progress_widget is not None and self._progress_task_id is not None:
+                try:
+                    # Ensure total matches current text length
+                    # Compute times for first line: elapsed / total_time
+                    left_chars = max(0, total_chars - sent_chars)
+                    time_left_s = (left_chars / self._tx_rate_ema) if (self._tx_rate_ema > 0 and status == TransmitStatus.SENDING) else None
+                    if status == TransmitStatus.SENT:
+                        time_left_s = 0.0
+                    total_time_s = (elapsed_s + time_left_s) if time_left_s is not None else None
+                    time_pair = f"{self._fmt_seconds(elapsed_s)} / {self._fmt_seconds(total_time_s)}"
+                    self._progress_widget.update(
+                        self._progress_task_id,
+                        total=max(1, total_chars),
+                        completed=max(0, min(sent_chars, total_chars)),
+                        time_pair=time_pair,
+                    )
+                except Exception:
+                    pass
+
+        # Build a single renderable and update via Live to avoid scrolling
+        renderables: List[Any] = [colored_text]
+        if self.show_progress and self._progress_widget is not None:
+            renderables.append(self._progress_widget)
+
+        # Additional stats line: sent/left/total and ETA
+        left_chars = max(0, total_chars - sent_chars)
+        time_left_s = (left_chars / self._tx_rate_ema) if (self._tx_rate_ema > 0 and status == TransmitStatus.SENDING) else None
+        if status == TransmitStatus.SENT:
+            time_left_s = 0.0
+        total_time_s = (elapsed_s + time_left_s) if time_left_s is not None else None
+        stats_line = Text(
+            f"{sent_chars}/{left_chars}/{total_chars}  {self._fmt_seconds(elapsed_s)}/{self._fmt_seconds(time_left_s)}/{self._fmt_seconds(total_time_s)}",
+            style=self.colors.info,
+        )
+        renderables.append(stats_line)
+
+        panel = Panel(
+            Group(*renderables),
             title=f"[{self._get_status_color(status)}]{status_label}[/]",
             border_style=self._get_status_color(status),
-        ))
-        
-        if self.show_progress and status == TransmitStatus.SENDING:
-            self.console.print()
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            ) as progress_bar:
-                task = progress_bar.add_task("Transmitting...", total=100)
-                progress_bar.update(task, completed=progress * 100)
+        )
+
+        # Start or update a persistent live view
+        if self._live is None:
+            self._live = Live(panel, refresh_per_second=12, console=self.console)
+            try:
+                self._live.start()
+            except Exception:
+                # Fallback: print once if Live cannot start in this context
+                self.console.print(panel)
+                return
+        else:
+            try:
+                self._live.update(panel)
+            except Exception:
+                # Fallback update
+                self.console.print(panel)
+
+        # On terminal states, stop Live and leave final panel rendered
+        if status in (TransmitStatus.SENT, TransmitStatus.ERROR):
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
+            # Reset progress widget for next transmission
+            self._progress_widget = None
+            self._progress_task_id = None
     
     def show_receiving_output(
         self,

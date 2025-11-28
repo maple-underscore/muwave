@@ -721,8 +721,8 @@ def web(config: Optional[str], host: str, port: int, party: tuple, debug: bool):
 @main.command()
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--config', '-c', type=str, default=None, help='Path to configuration file')
-@click.option('--speed', '-s', type=click.Choice(['slow', 'medium', 'fast', 'ultra-fast'], case_sensitive=False), default=None, help='Speed mode used during encoding')
-@click.option('--redundancy', '-r', type=click.Choice(['low', 'medium', 'high'], case_sensitive=False), default=None, help='Redundancy mode used during encoding')
+@click.option('--speed', '-s', type=str, default=None, help='Speed mode used during encoding (see config.yaml for available modes)')
+@click.option('--redundancy', '-r', type=str, default=None, help='Redundancy mode used during encoding (see config.yaml for available modes)')
 @click.option('--symbol-duration', type=float, default=None, help='Symbol duration in milliseconds (overrides speed mode)')
 @click.option('--repetitions', type=int, default=None, help='Number of repetitions (overrides redundancy mode)')
 @click.option('--channels', type=click.Choice(['1', '2', '3', '4'], case_sensitive=False), default=None, help='Number of frequency channels used during encoding (1=mono, 2=dual, 3=tri, 4=quad)')
@@ -748,6 +748,19 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
         cfg = Config(config) if config else Config()
     except FileNotFoundError:
         cfg = Config()
+    
+    # Validate speed and redundancy modes if provided
+    if speed:
+        available_speeds = list(cfg.speed.get('modes', {}).keys())
+        if speed not in available_speeds:
+            click.echo(f"Error: Invalid speed mode '{speed}'. Available modes: {', '.join(available_speeds)}")
+            return
+    
+    if redundancy:
+        available_redundancy = list(cfg.redundancy.get('modes', {}).keys())
+        if redundancy not in available_redundancy:
+            click.echo(f"Error: Invalid redundancy mode '{redundancy}'. Available modes: {', '.join(available_redundancy)}")
+            return
     
     # Create UI for output
     ui = create_interface(cfg.ui)
@@ -1063,8 +1076,8 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
 @click.option('--output', '-o', type=str, default='output.wav', help='Output WAV file path')
 @click.option('--config', '-c', type=str, default=None, help='Path to configuration file')
 @click.option('--name', '-n', type=str, default=None, help='Party name')
-@click.option('--speed', '-s', type=click.Choice(['slow', 'medium', 'fast', 'ultra-fast'], case_sensitive=False), default=None, help='Speed mode (overrides config)')
-@click.option('--redundancy', '-r', type=click.Choice(['low', 'medium', 'high'], case_sensitive=False), default=None, help='Redundancy mode (overrides config)')
+@click.option('--speed', '-s', type=str, default=None, help='Speed mode (overrides config, see config.yaml for available modes)')
+@click.option('--redundancy', '-r', type=str, default=None, help='Redundancy mode (overrides config, see config.yaml for available modes)')
 @click.option('--symbol-duration', type=float, default=None, help='Symbol duration in milliseconds (overrides speed mode)')
 @click.option('--repetitions', type=int, default=None, help='Number of repetitions (overrides redundancy mode)')
 @click.option('--volume', '-v', type=float, default=None, help='Audio volume (0.0 to 1.0)')
@@ -1093,6 +1106,19 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
         cfg = Config(config) if config else Config()
     except FileNotFoundError:
         cfg = Config()
+    
+    # Validate speed and redundancy modes if provided
+    if speed:
+        available_speeds = list(cfg.speed.get('modes', {}).keys())
+        if speed not in available_speeds:
+            click.echo(f"Error: Invalid speed mode '{speed}'. Available modes: {', '.join(available_speeds)}")
+            return
+    
+    if redundancy:
+        available_redundancy = list(cfg.redundancy.get('modes', {}).keys())
+        if redundancy not in available_redundancy:
+            click.echo(f"Error: Invalid redundancy mode '{redundancy}'. Available modes: {', '.join(available_redundancy)}")
+            return
     
     # Read from file if --file flag is set
     text_to_encode = prompt
