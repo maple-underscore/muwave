@@ -226,13 +226,15 @@ class MuwaveApp:
             message.sender_id[:8] if message.sender_id else None,
         )
     
-    def send_message(self, text: str, wait_for_audio: bool = True) -> bool:
+    def send_message(self, text: str, wait_for_audio: bool = True, 
+                     format_meta: Optional['FormatMetadata'] = None) -> bool:
         """
         Send a message.
         
         Args:
             text: Message text
             wait_for_audio: Whether to wait for other audio to complete
+            format_meta: Optional format metadata for the content
             
         Returns:
             True if sent successfully
@@ -250,7 +252,15 @@ class MuwaveApp:
             self.logger.log_transmission_start(self.party.party_id, len(text))
             
             transmitter = self._get_transmitter()
-            success = transmitter.transmit_text(text, blocking=True)
+            
+            # Create message with format metadata if provided
+            if format_meta:
+                message = self.party.create_message(text)
+                message.content_format = format_meta.format_type.value
+                message.format_language = format_meta.language
+                success = transmitter.transmit(message, blocking=True)
+            else:
+                success = transmitter.transmit_text(text, blocking=True)
             
             if success:
                 self.logger.log_message_sent(self.party.party_id, text)
@@ -539,10 +549,127 @@ def run(config: Optional[str], name: Optional[str], ai: bool):
 @click.argument('message')
 @click.option('--config', '-c', type=str, default=None, help='Path to configuration file')
 @click.option('--name', '-n', type=str, default=None, help='Party name')
-def send(message: str, config: Optional[str], name: Optional[str]):
-    """Send a message and exit."""
+@click.option('--speed', '-s', type=str, default=None, help='Speed mode (overrides config, see config.yaml for available modes)')
+@click.option('--redundancy', '-r', type=str, default=None, help='Redundancy mode (overrides config, see config.yaml for available modes)')
+@click.option('--symbol-duration', type=float, default=None, help='Symbol duration in milliseconds (overrides speed mode)')
+@click.option('--repetitions', type=int, default=None, help='Number of repetitions (overrides redundancy mode)')
+@click.option('--volume', '-v', type=float, default=None, help='Audio volume (0.0 to 1.0)')
+@click.option('--channels', type=click.Choice(['1', '2', '3', '4'], case_sensitive=False), default=None, help='Number of frequency channels (1=mono, 2=dual, 3=tri, 4=quad). Higher=faster but less accurate.')
+@click.option('--file', '-f', is_flag=True, help='Treat MESSAGE as a file path and encode its contents')
+@click.option('--format', type=click.Choice(['plain', 'markdown', 'html', 'json', 'xml', 'code', 'yaml', 'auto'], case_sensitive=False), default='auto', help='Content format (auto=detect automatically)')
+@click.option('--language', '-l', type=str, default=None, help='Programming language for code blocks')
+def send(message: str, config: Optional[str], name: Optional[str],
+         speed: Optional[str], redundancy: Optional[str],
+         symbol_duration: Optional[float], repetitions: Optional[int],
+         volume: Optional[float], channels: Optional[str], file: bool,
+         format: Optional[str], language: Optional[str]):
+    """Send a message and exit.
+    
+    This command takes a text message (or file with --file), converts it to an audio 
+    signal using FSK modulation, and transmits it through the audio device.
+    
+    Examples:
+        muwave send "Hello, World!"
+        muwave send message.txt --file
+        muwave send "Test message" --speed fast --redundancy high
+        muwave send script.txt -f --format code --language python
+    """
+    # Load configuration
+    try:
+        cfg = Config(config) if config else Config()
+    except FileNotFoundError:
+        cfg = Config()
+    
+    # Validate speed and redundancy modes if provided
+    if speed:
+        available_speeds = list(cfg.speed.get('modes', {}).keys())
+        if speed not in available_speeds:
+            click.echo(f"Error: Invalid speed mode '{speed}'. Available modes: {', '.join(available_speeds)}")
+            return
+    
+    if redundancy:
+        available_redundancy = list(cfg.redundancy.get('modes', {}).keys())
+        if redundancy not in available_redundancy:
+            click.echo(f"Error: Invalid redundancy mode '{redundancy}'. Available modes: {', '.join(available_redundancy)}")
+            return
+    
+    # Read from file if --file flag is set
+    text_to_send = message
+    if file:
+        try:
+            with open(message, 'r', encoding='utf-8') as f:
+                text_to_send = f.read()
+        except FileNotFoundError:
+            click.echo(f"Error: File not found: {message}")
+            return
+        except Exception as e:
+            click.echo(f"Error reading file: {e}")
+            return
+    
+    # Apply configuration overrides
+    if speed:
+        cfg.set("speed.mode", speed)
+    
+    if redundancy:
+        cfg.set("redundancy.mode", redundancy)
+    
+    # Get protocol settings based on speed and redundancy modes
+    speed_settings = cfg.get_speed_mode_settings()
+    redundancy_settings = cfg.get_redundancy_mode_settings()
+    
+    # Apply specific overrides
+    if symbol_duration is not None:
+        speed_settings["symbol_duration_ms"] = symbol_duration
+    
+    if repetitions is not None:
+        redundancy_settings["repetitions"] = repetitions
+    
+    if volume is not None:
+        if not 0.0 <= volume <= 1.0:
+            click.echo("Error: Volume must be between 0.0 and 1.0")
+            return
+        cfg.set("audio.volume", volume)
+    
+    # Set num_channels
+    if channels:
+        cfg.set("audio.num_channels", int(channels))
+    
+    # Update protocol config with new settings
+    protocol_config = {
+        **cfg.audio,
+        **cfg.protocol,
+        "symbol_duration_ms": speed_settings.get("symbol_duration_ms", 50),
+        "repetitions": redundancy_settings.get("repetitions", 1),
+    }
+    
+    # Create app with updated config
     app = MuwaveApp(config_path=config, party_name=name)
-    app.send_message(message)
+    app._protocol_config = protocol_config
+    app._transmitter = None  # Force recreation with new config
+    
+    # Detect or set format
+    from muwave.utils.formats import FormatDetector, FormatMetadata, ContentFormat
+    
+    format_meta = None
+    if format and format != 'auto':
+        # Map format string to ContentFormat enum
+        format_map = {
+            'plain': ContentFormat.PLAIN_TEXT,
+            'markdown': ContentFormat.MARKDOWN,
+            'html': ContentFormat.HTML,
+            'json': ContentFormat.JSON,
+            'xml': ContentFormat.XML,
+            'code': ContentFormat.CODE,
+            'yaml': ContentFormat.YAML,
+        }
+        if format.lower() in format_map:
+            format_meta = FormatMetadata(format_map[format.lower()], language=language)
+    else:
+        # Auto-detect format
+        format_meta = FormatDetector.detect(text_to_send)
+    
+    # Send the message
+    app.send_message(text_to_send, format_meta=format_meta)
     app.cleanup()
 
 

@@ -5,7 +5,7 @@ audio:
   input_device: null
   output_device: null
 speed:
-  mode: medium
+  mode: s40
   modes:
     s120:
       symbol_duration_ms: 120
@@ -23,6 +23,10 @@ speed:
       symbol_duration_ms: 45
       bandwidth_hz: 600
       description: Faster speed with moderate reliability (22.2 symbols/sec)
+    s40:
+      symbol_duration_ms: 40
+      bandwidth_hz: 700
+      description: High speed with lower reliability (25 symbols/sec) [SYSTEM DEFAULT]
     s35:
       symbol_duration_ms: 35
       bandwidth_hz: 800
@@ -53,7 +57,7 @@ redundancy:
     medium:
       repetitions: 2
       error_correction: true
-      description: Basic error correction with 2x repetition
+      description: Basic error correction with 2x repetition [SYSTEM DEFAULT]
     high:
       repetitions: 3
       error_correction: true
@@ -113,7 +117,7 @@ protocol:
   - 4050
   signal_duration_ms: 200
   silence_ms: 50
-  channel_spacing: 420
+  channel_spacing: 400
   party_id: null
   self_recognition: true
 ollama:
@@ -129,10 +133,10 @@ ollama:
     base_url: http://localhost:11434
     timeout_seconds: 120
   model:
-    name: llama3.2
+    name: qwen3-4b-16k
     keep_context: true
     max_context_length: 16384
-  system_prompt: You are a helpful AI assistant communicating through an audio protocol.
+  system_prompt: You are a helpful AI assistant communicating through an audio protocol. The audio protocol may introduce errors, so always confirm critical information and ask for clarifications when needed.
 ui:
   rich_interface: true
   colors:

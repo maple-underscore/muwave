@@ -5,7 +5,7 @@ Provides color-coded transmission status and real-time output.
 
 import time
 import threading
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
@@ -108,6 +108,8 @@ class RichInterface:
         self._tx_rate_ema: float = 0.0
         self._tx_active_text: Optional[str] = None
         self._tx_start_time: Optional[float] = None
+        self._tx_final_elapsed: Optional[float] = None
+        self._tx_final_total: Optional[float] = None
 
     def _fmt_seconds(self, seconds: Optional[float]) -> str:
         """Format seconds as MM:SS; returns --:-- if None or invalid."""
@@ -116,6 +118,85 @@ class RichInterface:
         total = int(round(seconds))
         m, s = divmod(total, 60)
         return f"{m:02d}:{s:02d}"
+
+    def _truncate_text_for_display(self, text: str, max_lines: int = 10, max_chars_per_line: int = 100,
+                                   current_pos: int = 0) -> Tuple[str, bool, int, int, List[str]]:
+        """
+        Truncate long text to fit within terminal bounds, showing start and end.
+        
+        Args:
+            text: Original text to display
+            max_lines: Maximum number of lines to show
+            max_chars_per_line: Maximum characters per line
+            current_pos: Current character position in transmission (for scrolling preview)
+            
+        Returns:
+            Tuple of (truncated_text, was_truncated, truncation_start_pos, truncation_end_pos, hidden_lines)
+            where positions indicate where the truncated content starts and ends in original text
+            and hidden_lines are the lines in the truncated section
+        """
+        lines = text.split('\n')
+        
+        # If text is short enough, return as-is
+        if len(lines) <= max_lines and all(len(line) <= max_chars_per_line for line in lines):
+            return text, False, 0, 0, []
+        
+        # Special case: single very long line – create synthetic hidden segments inside the line
+        if len(lines) == 1 and len(lines[0]) > max_chars_per_line:
+            line = lines[0]
+            # We will keep a head and tail segment and treat middle as hidden
+            head_len = max_chars_per_line // 2
+            tail_len = max_chars_per_line // 2
+            if head_len + tail_len >= len(line):  # Fallback if sizing odd
+                return line, False, 0, 0, []
+            truncation_start_pos = head_len
+            truncation_end_pos = len(line) - tail_len
+            hidden_mid = line[truncation_start_pos:truncation_end_pos]
+            hidden_lines = [hidden_mid]  # treat middle as single hidden line
+            display = (
+                line[:head_len] + '\n' + '<<TRUNCATION_START>>' + '\n' + '<<TRUNCATION_PREVIEW>>' + '\n' + '<<TRUNCATION_END>>' + '\n' + line[-tail_len:]
+            )
+            return display, True, truncation_start_pos, truncation_end_pos, hidden_lines
+
+        # Calculate how many lines to show from start and end (multi-line case)
+        if len(lines) > max_lines:
+            lines_to_show = max(2, max_lines - 3)  # Reserve 3 lines for truncation markers and preview
+            start_lines = lines_to_show // 2
+            end_lines = lines_to_show - start_lines
+            
+            # Calculate character positions in original text
+            truncation_start_pos = sum(len(line) + 1 for line in lines[:start_lines])  # +1 for newline
+            truncation_end_pos = sum(len(line) + 1 for line in lines[:-end_lines]) if end_lines > 0 else len(text)
+            
+            # Get the hidden lines
+            hidden_lines = lines[start_lines:-end_lines] if end_lines > 0 else lines[start_lines:]
+            
+            truncated_lines = (
+                lines[:start_lines] +
+                ['<<TRUNCATION_START>>'] +
+                ['<<TRUNCATION_PREVIEW>>'] +
+                ['<<TRUNCATION_END>>'] +
+                lines[-end_lines:]
+            )
+        else:
+            truncated_lines = lines
+            truncation_start_pos = 0
+            truncation_end_pos = 0
+            hidden_lines = []
+        
+        # Truncate individual lines if they're too long
+        result_lines = []
+        for line in truncated_lines:
+            if len(line) > max_chars_per_line and not line.startswith('<<TRUNCATION'):
+                # Show start and end of long lines
+                show_chars = max_chars_per_line - 7  # Reserve space for " ... "
+                start_chars = show_chars // 2
+                end_chars = show_chars - start_chars
+                result_lines.append(line[:start_chars] + ' ... ' + line[-end_chars:])
+            else:
+                result_lines.append(line)
+        
+        return '\n'.join(result_lines), True, truncation_start_pos, truncation_end_pos, hidden_lines
 
     def _make_progress_bar(self, progress: float, width: int = 40) -> Text:
         """Create a simple textual progress bar (no new lines printed)."""
@@ -175,30 +256,210 @@ class RichInterface:
         text: str,
         sent_chars: int = 0,
         sending_chars: int = 0,
+        truncation_start: int = 0,
+        truncation_end: int = 0,
+        original_sent_chars: int = 0,
+        original_sending_chars: int = 0,
+        hidden_lines: Optional[List[str]] = None,
     ) -> Text:
         """
-        Create color-coded transmit text.
+        Create color-coded transmit text with scrolling preview of hidden content.
         
         Args:
-            text: Full text being transmitted
-            sent_chars: Number of characters already sent (green)
-            sending_chars: Number of characters currently sending (blue)
+            text: Text being displayed (may be truncated)
+            sent_chars: Number of characters already sent in display text (green)
+            sending_chars: Number of characters currently sending in display text (blue)
+            truncation_start: Start position of truncated content in original text
+            truncation_end: End position of truncated content in original text
+            original_sent_chars: Actual sent chars in original text (for truncation marker coloring)
+            original_sending_chars: Actual sending chars in original text
+            hidden_lines: Lines that are hidden in the truncated section
             
         Returns:
             Rich Text object with color coding
         """
         result = Text()
+        hidden_lines = hidden_lines or []
         
-        if sent_chars > 0:
-            result.append(text[:sent_chars], style=self.colors.sent)
+        # Find the truncation markers
+        start_marker = '<<TRUNCATION_START>>'
+        preview_marker = '<<TRUNCATION_PREVIEW>>'
+        end_marker = '<<TRUNCATION_END>>'
         
-        if sending_chars > 0:
-            end_sending = min(sent_chars + sending_chars, len(text))
-            result.append(text[sent_chars:end_sending], style=self.colors.sending)
+        start_pos = text.find(start_marker)
+        preview_pos = text.find(preview_marker)
+        end_pos = text.find(end_marker)
         
-        remaining_start = sent_chars + sending_chars
-        if remaining_start < len(text):
-            result.append(text[remaining_start:], style=self.colors.waiting)
+        if start_pos >= 0 and preview_pos >= 0 and end_pos >= 0 and truncation_start > 0 and truncation_end > truncation_start:
+            # Split text around the markers
+            before_truncation = text[:start_pos]
+            after_truncation = text[end_pos + len(end_marker):]
+            
+            # Color the text before truncation
+            before_len = len(before_truncation)
+            if original_sent_chars >= truncation_start:
+                result.append(before_truncation, style=self.colors.sent)
+            elif original_sent_chars > 0:
+                result.append(before_truncation[:original_sent_chars], style=self.colors.sent)
+                if original_sent_chars + original_sending_chars >= truncation_start:
+                    result.append(before_truncation[original_sent_chars:], style=self.colors.sending)
+                else:
+                    if original_sending_chars > 0:
+                        result.append(before_truncation[original_sent_chars:original_sent_chars + original_sending_chars], 
+                                    style=self.colors.sending)
+                    if original_sent_chars + original_sending_chars < before_len:
+                        result.append(before_truncation[original_sent_chars + original_sending_chars:], 
+                                    style=self.colors.waiting)
+            else:
+                result.append(before_truncation, style=self.colors.waiting)
+            
+            # Add first truncation marker with progress bar
+            truncated_length = truncation_end - truncation_start
+            hidden_sent = max(0, min(truncated_length, original_sent_chars - truncation_start))
+            hidden_progress = min(1.0, hidden_sent / truncated_length) if truncated_length > 0 else 0.0
+            
+            marker_text = '⋯⋯⋯ content truncated ⋯⋯⋯'
+            # When fully sent, make whole marker green
+            marker_sent_len = len(marker_text) if hidden_progress >= 1.0 else int(len(marker_text) * hidden_progress)
+            
+            if marker_sent_len > 0:
+                result.append(marker_text[:marker_sent_len], style=self.colors.sent)
+            hidden_sending_end = max(0, min(truncated_length, original_sent_chars + original_sending_chars - truncation_start))
+            if marker_sent_len < len(marker_text) and hidden_progress < 1.0:
+                if hidden_sending_end > hidden_sent:
+                    sending_progress = min(1.0, hidden_sending_end / truncated_length)
+                    marker_sending_len = int(len(marker_text) * sending_progress) - marker_sent_len
+                    if marker_sending_len > 0:
+                        result.append(marker_text[marker_sent_len:marker_sent_len + marker_sending_len], style=self.colors.sending)
+                        remainder = marker_text[marker_sent_len + marker_sending_len:]
+                        if remainder:
+                            result.append(remainder, style=self.colors.waiting)
+                    else:
+                        result.append(marker_text[marker_sent_len:], style=self.colors.waiting)
+                else:
+                    result.append(marker_text[marker_sent_len:], style=self.colors.waiting)
+            
+            result.append('\n')
+            
+            # Show dynamic preview based on current transmission position
+            if hidden_lines:
+                # Calculate which line we're currently on in the hidden section
+                hidden_char_pos = max(0, original_sent_chars - truncation_start)
+                
+                # Find which hidden line corresponds to this position
+                cumulative_chars = 0
+                current_line_idx = 0
+                for idx, line in enumerate(hidden_lines):
+                    if cumulative_chars + len(line) + 1 > hidden_char_pos:  # +1 for newline
+                        current_line_idx = idx
+                        break
+                    cumulative_chars += len(line) + 1
+                
+                # Determine what to show
+                if hidden_progress >= 1.0:
+                    # Done transmitting, show last 5 lines of hidden content
+                    show_lines = hidden_lines[-5:] if len(hidden_lines) >= 5 else hidden_lines
+                    for line in show_lines:
+                        result.append(line, style=self.colors.sent)
+                        result.append('\n')
+                elif hidden_progress > 0:
+                    # Currently transmitting, show fixed 8-line window (preview) plus markers outside
+                    preview_limit = 8
+                    half = preview_limit // 2
+                    start_idx = max(0, current_line_idx - half)
+                    end_idx = start_idx + preview_limit
+                    if end_idx > len(hidden_lines):
+                        end_idx = len(hidden_lines)
+                        start_idx = max(0, end_idx - preview_limit)
+                    show_lines = hidden_lines[start_idx:end_idx]
+                    # Recompute cumulative chars for each line for accurate char_in_line
+                    cumulative_list = []
+                    acc = 0
+                    for l in hidden_lines:
+                        cumulative_list.append(acc)
+                        acc += len(l) + 1
+                    for line_idx, line in enumerate(hidden_lines):
+                        if line_idx == current_line_idx:
+                            line_start_pos = cumulative_list[line_idx]
+                            char_in_line = max(0, hidden_char_pos - line_start_pos)
+                            break
+                    for idx, line in enumerate(show_lines):
+                        actual_idx = start_idx + idx
+                        if actual_idx < current_line_idx:
+                            result.append(line, style=self.colors.sent)
+                        elif actual_idx == current_line_idx:
+                            line_start_pos = cumulative_list[actual_idx]
+                            char_in_line = max(0, hidden_char_pos - line_start_pos)
+                            if char_in_line >= len(line):
+                                # Fully sent line
+                                result.append(line, style=self.colors.sent)
+                            else:
+                                if char_in_line > 0:
+                                    result.append(line[:char_in_line], style=self.colors.sent)
+                                sending_in_line = min(len(line) - char_in_line, max(1, len(line) // 25))
+                                # If this chunk completes the line, color it green instead of leaving tail yellow
+                                if char_in_line + sending_in_line >= len(line):
+                                    result.append(line[char_in_line:], style=self.colors.sending)
+                                else:
+                                    result.append(line[char_in_line:char_in_line + sending_in_line], style=self.colors.sending)
+                                    result.append(line[char_in_line + sending_in_line:], style=self.colors.waiting)
+                        else:
+                            result.append(line, style=self.colors.waiting)
+                        result.append('\n')
+                else:
+                    # Haven't started hidden section, show first 5 lines
+                    show_lines = hidden_lines[:5] if len(hidden_lines) >= 5 else hidden_lines
+                    for line in show_lines:
+                        result.append(line, style=self.colors.waiting)
+                        result.append('\n')
+            
+            # Add second truncation marker (mirror first) fully green when done
+            if hidden_progress >= 1.0:
+                result.append(marker_text, style=self.colors.sent)
+            else:
+                if marker_sent_len > 0:
+                    result.append(marker_text[:marker_sent_len], style=self.colors.sent)
+                if marker_sent_len < len(marker_text):
+                    if hidden_sending_end > hidden_sent:
+                        sending_progress = min(1.0, hidden_sending_end / truncated_length)
+                        marker_sending_len = int(len(marker_text) * sending_progress) - marker_sent_len
+                        if marker_sending_len > 0:
+                            result.append(marker_text[marker_sent_len:marker_sent_len + marker_sending_len], style=self.colors.sending)
+                            remainder = marker_text[marker_sent_len + marker_sending_len:]
+                            if remainder:
+                                result.append(remainder, style=self.colors.waiting)
+                        else:
+                            result.append(marker_text[marker_sent_len:], style=self.colors.waiting)
+                    else:
+                        result.append(marker_text[marker_sent_len:], style=self.colors.waiting)
+            
+            # Color the text after truncation
+            chars_before_and_hidden = truncation_end
+            
+            if original_sent_chars >= chars_before_and_hidden:
+                after_sent = min(len(after_truncation), original_sent_chars - chars_before_and_hidden)
+                after_sending = min(len(after_truncation) - after_sent, original_sending_chars)
+                
+                if after_sent > 0:
+                    result.append(after_truncation[:after_sent], style=self.colors.sent)
+                if after_sending > 0:
+                    result.append(after_truncation[after_sent:after_sent + after_sending], style=self.colors.sending)
+                if after_sent + after_sending < len(after_truncation):
+                    result.append(after_truncation[after_sent + after_sending:], style=self.colors.waiting)
+            else:
+                result.append(after_truncation, style=self.colors.waiting)
+        else:
+            # No truncation, use simple coloring
+            if sent_chars > 0:
+                result.append(text[:sent_chars], style=self.colors.sent)
+            
+            if sending_chars > 0:
+                end_sending = min(sent_chars + sending_chars, len(text))
+                result.append(text[sent_chars:end_sending], style=self.colors.sending)
+            
+            remaining_start = sent_chars + sending_chars
+            if remaining_start < len(text):
+                result.append(text[remaining_start:], style=self.colors.waiting)
         
         return result
     
@@ -228,7 +489,25 @@ class RichInterface:
             sent_chars = total_chars
             sending_chars = 0
         
-        colored_text = self.create_transmit_text(text, sent_chars, sending_chars)
+        # Truncate text for display if it's too long
+        display_text, was_truncated, truncation_start, truncation_end, hidden_lines = self._truncate_text_for_display(
+            text, max_lines=8, max_chars_per_line=120, current_pos=sent_chars
+        )
+        
+        # Create colored text with proper progress tracking
+        if was_truncated:
+            colored_text = self.create_transmit_text(
+                display_text,
+                sent_chars=sent_chars,  # Not used when truncated, but passed for compatibility
+                sending_chars=sending_chars,  # Not used when truncated
+                truncation_start=truncation_start,
+                truncation_end=truncation_end,
+                original_sent_chars=sent_chars,
+                original_sending_chars=sending_chars,
+                hidden_lines=hidden_lines,
+            )
+        else:
+            colored_text = self.create_transmit_text(display_text, sent_chars, sending_chars)
 
         # Reset tracking if new transmission text or terminal state
         if self._tx_active_text != text or status in (TransmitStatus.SENT, TransmitStatus.ERROR, TransmitStatus.WAITING and sent_chars == 0):
@@ -236,6 +515,8 @@ class RichInterface:
             self._tx_prev_sent = 0
             self._tx_rate_ema = 0.0
             self._tx_start_time = None
+            self._tx_final_elapsed = None
+            self._tx_final_total = None
             if status in (TransmitStatus.SENT, TransmitStatus.ERROR):
                 self._tx_active_text = None
             else:
@@ -255,9 +536,22 @@ class RichInterface:
             self._tx_prev_time = now
             self._tx_prev_sent = sent_chars
         elif status in (TransmitStatus.SENT, TransmitStatus.ERROR):
+            # Capture final times before resetting
+            if self._tx_start_time is not None and self._tx_final_elapsed is None:
+                self._tx_final_elapsed = max(0.0, now - self._tx_start_time)
+                # Calculate final total time if we have rate data
+                if self._tx_rate_ema > 0:
+                    self._tx_final_total = self._tx_final_elapsed
+                else:
+                    self._tx_final_total = self._tx_final_elapsed
             self._tx_rate_ema = 0.0
             self._tx_prev_time = None
-        elapsed_s = 0.0 if self._tx_start_time is None else max(0.0, now - self._tx_start_time)
+        
+        # Use frozen time for completed transmissions, otherwise calculate current elapsed
+        if status in (TransmitStatus.SENT, TransmitStatus.ERROR) and self._tx_final_elapsed is not None:
+            elapsed_s = self._tx_final_elapsed
+        else:
+            elapsed_s = 0.0 if self._tx_start_time is None else max(0.0, now - self._tx_start_time)
 
         status_label = {
             TransmitStatus.WAITING: "⏳ Waiting",
@@ -298,15 +592,23 @@ class RichInterface:
             if self._progress_widget is not None and self._progress_task_id is not None:
                 try:
                     # Ensure total matches current text length
-                    # Compute times for first line: elapsed / total_time
+                    # Compute times for progress bar
                     left_chars = max(0, total_chars - sent_chars)
-                    time_left_s = (left_chars / self._tx_rate_ema) if (self._tx_rate_ema > 0 and status == TransmitStatus.SENDING) else None
+                    
                     if status == TransmitStatus.SENT:
+                        # Use frozen final times
                         time_left_s = 0.0
-                    total_time_s = (elapsed_s + time_left_s) if time_left_s is not None else None
+                        total_time_s = self._tx_final_total if self._tx_final_total is not None else elapsed_s
+                        description = "Transmitted!"
+                    else:
+                        time_left_s = (left_chars / self._tx_rate_ema) if (self._tx_rate_ema > 0 and status == TransmitStatus.SENDING) else None
+                        total_time_s = (elapsed_s + time_left_s) if time_left_s is not None else None
+                        description = "Transmitting..."
+                    
                     time_pair = f"{self._fmt_seconds(elapsed_s)} / {self._fmt_seconds(total_time_s)}"
                     self._progress_widget.update(
                         self._progress_task_id,
+                        description=description,
                         total=max(1, total_chars),
                         completed=max(0, min(sent_chars, total_chars)),
                         time_pair=time_pair,
@@ -321,10 +623,15 @@ class RichInterface:
 
         # Additional stats line: sent/left/total and ETA
         left_chars = max(0, total_chars - sent_chars)
-        time_left_s = (left_chars / self._tx_rate_ema) if (self._tx_rate_ema > 0 and status == TransmitStatus.SENDING) else None
+        
         if status == TransmitStatus.SENT:
+            # Use frozen final times
             time_left_s = 0.0
-        total_time_s = (elapsed_s + time_left_s) if time_left_s is not None else None
+            total_time_s = self._tx_final_total if self._tx_final_total is not None else elapsed_s
+        else:
+            time_left_s = (left_chars / self._tx_rate_ema) if (self._tx_rate_ema > 0 and status == TransmitStatus.SENDING) else None
+            total_time_s = (elapsed_s + time_left_s) if time_left_s is not None else None
+        
         stats_line = Text(
             f"{sent_chars}/{left_chars}/{total_chars}  {self._fmt_seconds(elapsed_s)}/{self._fmt_seconds(time_left_s)}/{self._fmt_seconds(total_time_s)}",
             style=self.colors.info,
