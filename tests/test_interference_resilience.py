@@ -337,7 +337,8 @@ class TestAdaptiveNoiseFloor:
         noise_amplitude = 0.1
         noise = np.random.normal(0, noise_amplitude, 44100).astype(np.float32)
         
-        noise_floor = demod._measure_noise_floor(noise)
+        # Access the frequency detector's noise floor measurement
+        noise_floor = demod._freq_detector.measure_noise_floor(noise)
         
         assert noise_floor > 0, "Noise floor should be positive"
         assert noise_floor < 1.0, "Noise floor should be reasonable"

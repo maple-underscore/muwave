@@ -958,14 +958,36 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
     # Try to read metadata header if no manual settings provided
     detected_channels = None
     detected_duration = None
+    detected_base_freq = None
+    detected_freq_step = None
+    detected_channel_spacing = None
+    metadata_valid = False
     
     if channels is None and (speed is None and symbol_duration is None):
         ui.print_info("Reading metadata header...")
-        # Create a temporary demodulator to read metadata
-        temp_config = cfg.create_fsk_config(symbol_duration_ms=35, num_channels=1)
+        # Create a temporary demodulator to read metadata (uses standardized format)
+        temp_config = cfg.create_fsk_config()
         temp_demod = FSKDemodulator(temp_config)
-        detected_channels, detected_duration, _ = temp_demod.decode_metadata(message_samples)
-        ui.print_success(f"Detected: {detected_channels} channels, {detected_duration}ms symbol duration")
+        metadata, _ = temp_demod.decode_metadata(message_samples)
+        
+        if metadata['valid']:
+            detected_channels = metadata['num_channels']
+            detected_duration = int(metadata['symbol_duration_ms'])
+            detected_base_freq = metadata['base_frequency']
+            detected_freq_step = metadata['frequency_step']
+            detected_channel_spacing = metadata['channel_spacing']
+            detected_sig_length = metadata.get('signature_length', 8)
+            metadata_valid = True
+            ui.print_success(f"Metadata valid (checksum OK, version {metadata.get('version', 1)})")
+            ui.print_success(f"  Channels: {detected_channels}")
+            ui.print_success(f"  Symbol duration: {detected_duration}ms")
+            ui.print_success(f"  Base frequency: {detected_base_freq}Hz")
+            ui.print_success(f"  Frequency step: {detected_freq_step}Hz")
+            ui.print_success(f"  Channel spacing: {detected_channel_spacing}Hz")
+            ui.print_success(f"  Signature length: {detected_sig_length} bytes")
+        else:
+            detected_sig_length = 8  # Default for invalid/missing metadata
+            ui.print_warning("Metadata header invalid or not found, will auto-detect settings")
     
     # Set num_channels
     num_channels = int(channels) if channels else (detected_channels if detected_channels else 2)
@@ -1052,10 +1074,21 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
             redundancy_settings = cfg.get_redundancy_mode_settings()
             reps = repetitions if repetitions is not None else redundancy_settings.get("repetitions", 1)
             
-            fsk_config = cfg.create_fsk_config(
-                symbol_duration_ms=symbol_dur,
-                num_channels=num_channels,
-            )
+            # Create FSK config with all detected metadata values
+            fsk_config_kwargs = {
+                'symbol_duration_ms': symbol_dur,
+                'num_channels': num_channels,
+            }
+            if metadata_valid:
+                # Use all values from standardized metadata header
+                if detected_base_freq:
+                    fsk_config_kwargs['base_frequency'] = detected_base_freq
+                if detected_freq_step:
+                    fsk_config_kwargs['frequency_step'] = detected_freq_step
+                if detected_channel_spacing:
+                    fsk_config_kwargs['channel_spacing'] = detected_channel_spacing
+            
+            fsk_config = cfg.create_fsk_config(**fsk_config_kwargs)
             
             ui.print_info(f"Decoding with detected settings: {num_channels} channels, {symbol_dur}ms symbols...")
             

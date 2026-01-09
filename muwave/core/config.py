@@ -242,6 +242,9 @@ class Config:
         self,
         symbol_duration_ms: Optional[float] = None,
         num_channels: Optional[int] = None,
+        base_frequency: Optional[float] = None,
+        frequency_step: Optional[float] = None,
+        channel_spacing: Optional[float] = None,
     ) -> 'FSKConfig':
         """
         Create an FSKConfig from the current configuration.
@@ -249,6 +252,9 @@ class Config:
         Args:
             symbol_duration_ms: Override symbol duration (uses speed mode setting if None)
             num_channels: Override channel count (defaults to 2)
+            base_frequency: Override base frequency (uses config value if None)
+            frequency_step: Override frequency step (uses config value if None)
+            channel_spacing: Override channel spacing (uses config value if None)
             
         Returns:
             FSKConfig instance with values from config.yaml
@@ -262,8 +268,8 @@ class Config:
         
         return FSKConfig(
             sample_rate=self.audio.get("sample_rate", 44100),
-            base_frequency=self.protocol.get("base_frequency", 1800),
-            frequency_step=self.protocol.get("frequency_step", 120),
+            base_frequency=base_frequency if base_frequency is not None else self.protocol.get("base_frequency", 1800),
+            frequency_step=frequency_step if frequency_step is not None else self.protocol.get("frequency_step", 120),
             num_frequencies=self.protocol.get("num_frequencies", 16),
             symbol_duration_ms=symbol_duration_ms,
             start_frequencies=self.protocol.get("start_frequencies", [800, 850, 900]),
@@ -272,7 +278,7 @@ class Config:
             silence_ms=self.protocol.get("silence_ms", 50),
             volume=self.audio.get("volume", 0.8),
             num_channels=num_channels if num_channels is not None else 2,
-            channel_spacing=self.protocol.get("channel_spacing", 2400),
+            channel_spacing=channel_spacing if channel_spacing is not None else self.protocol.get("channel_spacing", 2400),
         )
     
     def __repr__(self) -> str:
