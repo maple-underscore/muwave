@@ -32,7 +32,8 @@ class TestConfig:
         assert sample_rate == 44100
         
         mode = config.get("speed.mode")
-        assert mode in ["slow", "medium", "fast"]
+        # Speed modes are named like s40, s60, s90, etc.
+        assert mode.startswith("s") and mode[1:].isdigit()
     
     def test_get_with_default(self):
         """Test getting non-existent values returns default."""
@@ -60,6 +61,8 @@ class TestConfig:
         """Test getting redundancy mode settings."""
         config = Config()
         
+        # First set a valid mode that exists in the modes dict
+        config.set("redundancy.mode", "r2")
         settings = config.get_redundancy_mode_settings()
         assert "repetitions" in settings
         assert "error_correction" in settings

@@ -50,19 +50,19 @@ speed:
 redundancy:
   mode: medium
   modes:
-    low:
+    r1:
       repetitions: 1
       error_correction: false
       description: No redundancy, fastest but least reliable
-    medium:
+    r2:
       repetitions: 2
       error_correction: true
       description: Basic error correction with 2x repetition [SYSTEM DEFAULT]
-    high:
+    r3:
       repetitions: 3
       error_correction: true
       description: Maximum reliability with 3x repetition and error correction
-    max:
+    r4:
       repetitions: 10
       error_correction: true
       description: Extreme reliability with 10x repetition and robust error correction
@@ -120,6 +120,14 @@ protocol:
   channel_spacing: 400
   party_id: null
   self_recognition: true
+  # Enhanced interference resilience options
+  use_chirp_signals: true        # Use frequency sweeps for start/end signals (more robust)
+  chirp_start_freq: 600          # Chirp starting frequency in Hz
+  chirp_end_freq: 2400           # Chirp ending frequency in Hz
+  use_barker_preamble: false     # Add Barker code for precise sync (optional)
+  barker_length: 13              # Barker code length (7, 11, or 13)
+  barker_carrier_freq: 1500      # Carrier frequency for Barker BPSK
+  barker_chip_duration_ms: 8     # Duration of each Barker chip
 ollama:
   mode: http
   docker:

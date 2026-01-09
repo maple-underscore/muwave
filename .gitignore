@@ -89,3 +89,6 @@ muwave_conversation.log
 # Local configuration (keep config.yaml as example)
 config.local.yaml
 muwave_conversation.log
+
+# Cache
+.mypy_cache

@@ -3,7 +3,7 @@
 Sound-based communication protocol for AI agents, compatible with Linux and macOS.
 
 > [!NOTE]
-> Version 0.1.3 introduces major performance improvements including parallel decoding (up to 4x faster), timestamp tracking, float64 precision, and advanced anti-interference measures for fast symbol rates.
+> Version 0.1.4 introduces major performance improvements including parallel decoding (up to 4x faster), timestamp tracking, float64 precision, and advanced anti-interference measures for fast symbol rates.
 
 ## Features
 
@@ -14,7 +14,7 @@ Sound-based communication protocol for AI agents, compatible with Linux and macO
 - **Adaptive Confidence**: Smart thresholds based on symbol rate and channel count
 - **Format Support**: Auto-detection for Markdown, JSON, XML, YAML, HTML, and code
 
-### Performance & Accuracy (v0.1.3)
+### Performance & Accuracy (v0.1.4)
 - **Parallel Processing**: Multi-threaded decoding using up to 4 workers for messages >20 bytes
 - **Timestamp Tracking**: Detailed timing information for every encode/decode operation
 - **Float64 Precision**: Enhanced accuracy in signal generation and Goertzel algorithm
@@ -513,7 +513,7 @@ muwave docker-start --model llama2  # Specify model
 
 ## Version History
 
-### Version 0.1.3 (Current)
+### Version 0.1.4 (Current)
 
 > [!IMPORTANT]
 > This release focuses on performance, accuracy, and signal quality improvements.
@@ -594,7 +594,7 @@ muwave docker-start --model llama2  # Specify model
 
 ### Encoding Performance
 
-| Message Size | Channels | Symbol Duration | Time (v0.1.2) | Time (v0.1.3) | Improvement |
+| Message Size | Channels | Symbol Duration | Time (v0.1.2) | Time (v0.1.4) | Improvement |
 |-------------|----------|-----------------|---------------|---------------|-------------|
 | 10 bytes    | 1        | 40ms           | 0.125s        | 0.118s        | 5.6%        |
 | 50 bytes    | 1        | 40ms           | 0.312s        | 0.289s        | 7.4%        |
@@ -604,7 +604,7 @@ muwave docker-start --model llama2  # Specify model
 
 ### Decoding Performance
 
-| Message Size | Workers | Time (v0.1.2) | Time (v0.1.3) | Speedup |
+| Message Size | Workers | Time (v0.1.2) | Time (v0.1.4) | Speedup |
 |-------------|---------|---------------|---------------|---------|
 | 10 bytes    | 1       | 0.815s        | 0.815s        | 1.0x    |
 | 25 bytes    | 4       | 1.234s        | 0.445s        | 2.8x    |
@@ -615,7 +615,7 @@ muwave docker-start --model llama2  # Specify model
 
 ### Confidence Accuracy
 
-| Symbol Rate | Channels | Confidence (v0.1.2) | Confidence (v0.1.3) | Notes |
+| Symbol Rate | Channels | Confidence (v0.1.2) | Confidence (v0.1.4) | Notes |
 |-------------|----------|---------------------|---------------------|-------|
 | 10ms        | 1        | 36% (warning)       | 35% (expected)      | Adaptive threshold |
 | 20ms        | 1        | 40% (warning)       | 40% (expected)      | Correct baseline |

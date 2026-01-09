@@ -5,6 +5,7 @@ Supports Markdown, HTML, JSON, XML, and other text formats.
 
 import re
 import json
+import zlib
 from enum import Enum
 from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
@@ -248,22 +249,30 @@ class FormatDetector:
 class FormatEncoder:
     """Encodes formatted content for transmission."""
     
+    # Compression flag byte values
+    _COMPRESSION_NONE = 0x00
+    _COMPRESSION_ZLIB = 0x01
+    
+    # Minimum size in bytes to apply compression (small payloads may get larger)
+    _COMPRESSION_THRESHOLD = 50
+    
     @staticmethod
-    def encode(content: str, format_meta: Optional[FormatMetadata] = None) -> bytes:
+    def encode(content: str, format_meta: Optional[FormatMetadata] = None, compress: bool = True) -> bytes:
         """
-        Encode content with format metadata.
+        Encode content with format metadata and optional compression.
         
         Args:
             content: Content to encode
             format_meta: Optional format metadata (auto-detected if None)
+            compress: Whether to compress the payload (default: True)
             
         Returns:
-            Encoded bytes with format prefix
+            Encoded bytes with format prefix and compression
         """
         if format_meta is None:
             format_meta = FormatDetector.detect(content)
         
-        # Encode: [metadata_length(1 byte)][metadata][content_bytes]
+        # Encode: [compression_flag(1 byte)][metadata_length(1 byte)][metadata][content_bytes]
         metadata_bytes = format_meta.to_bytes()
         metadata_length = len(metadata_bytes)
         
@@ -273,15 +282,76 @@ class FormatEncoder:
         
         content_bytes = content.encode('utf-8')
         
-        return bytes([metadata_length]) + metadata_bytes + content_bytes
+        # Apply compression if enabled and content is large enough
+        compression_flag = FormatEncoder._COMPRESSION_NONE
+        if compress and len(content_bytes) >= FormatEncoder._COMPRESSION_THRESHOLD:
+            compressed = zlib.compress(content_bytes, level=9)
+            # Only use compression if it actually reduces size
+            if len(compressed) < len(content_bytes):
+                content_bytes = compressed
+                compression_flag = FormatEncoder._COMPRESSION_ZLIB
+        
+        return bytes([compression_flag, metadata_length]) + metadata_bytes + content_bytes
     
     @staticmethod
     def decode(data: bytes) -> Tuple[str, Optional[FormatMetadata]]:
         """
-        Decode content with format metadata.
+        Decode content with format metadata and decompression.
         
         Args:
             data: Encoded bytes
+            
+        Returns:
+            Tuple of (content string, format metadata)
+        """
+        if len(data) < 2:
+            # Handle legacy format without compression flag
+            if len(data) < 1:
+                return "", None
+            # Try legacy decode (first byte is metadata_length)
+            return FormatEncoder._decode_legacy(data)
+        
+        compression_flag = data[0]
+        metadata_length = data[1]
+        
+        # Check if this is legacy format (compression flag would be a valid metadata length)
+        # Legacy format: [metadata_length(1 byte)][metadata][content]
+        # New format: [compression_flag(1 byte)][metadata_length(1 byte)][metadata][content]
+        # If first byte is > 1 (not a valid compression flag), it's likely legacy format
+        if compression_flag > FormatEncoder._COMPRESSION_ZLIB:
+            return FormatEncoder._decode_legacy(data)
+        
+        if len(data) < 2 + metadata_length:
+            # Malformed data, try legacy decode
+            return FormatEncoder._decode_legacy(data)
+        
+        metadata_bytes = data[2:2+metadata_length]
+        content_bytes = data[2+metadata_length:]
+        
+        # Decompress if needed
+        if compression_flag == FormatEncoder._COMPRESSION_ZLIB:
+            try:
+                content_bytes = zlib.decompress(content_bytes)
+            except zlib.error:
+                # Decompression failed, try as uncompressed
+                pass
+        
+        format_meta = FormatMetadata.from_bytes(metadata_bytes)
+        
+        try:
+            content = content_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return "", format_meta
+        
+        return content, format_meta
+    
+    @staticmethod
+    def _decode_legacy(data: bytes) -> Tuple[str, Optional[FormatMetadata]]:
+        """
+        Decode legacy format without compression flag.
+        
+        Args:
+            data: Encoded bytes in legacy format
             
         Returns:
             Tuple of (content string, format metadata)

@@ -7,9 +7,17 @@ import numpy as np
 from typing import List, Tuple, Optional, Dict
 import math
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import multiprocessing
 import time
+
+# Barker codes for enhanced synchronization
+# These have optimal autocorrelation properties (peak:sidelobe = N:1)
+BARKER_CODES = {
+    7: [1, 1, 1, -1, -1, 1, -1],
+    11: [1, 1, 1, -1, -1, -1, 1, -1, -1, 1, -1],
+    13: [1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1],
+}
 
 
 @dataclass
@@ -28,6 +36,15 @@ class FSKConfig:
     num_channels: int = 2  # 1=mono, 2=dual, 3=tri, 4=quad channel FSK (higher=faster but less accurate)
     channel_spacing: float = 2400.0  # Spacing between channel base frequencies
     
+    # Enhanced interference resilience options
+    use_chirp_signals: bool = True  # Use chirp (frequency sweep) for start/end signals
+    chirp_start_freq: float = 600.0  # Chirp starting frequency
+    chirp_end_freq: float = 2400.0   # Chirp ending frequency  
+    use_barker_preamble: bool = False  # Add Barker code preamble for sync
+    barker_length: int = 13  # Barker code length (7, 11, or 13)
+    barker_carrier_freq: float = 1500.0  # Carrier for Barker BPSK
+    barker_chip_duration_ms: float = 8.0  # Duration of each Barker chip
+    
     def __post_init__(self):
         """Validate configuration."""
         if self.num_channels > 4:
@@ -39,6 +56,9 @@ class FSKConfig:
             self.start_frequencies = [800.0, 850.0, 900.0]  # Triple-frequency start signal
         if self.end_frequencies is None:
             self.end_frequencies = [900.0, 950.0, 1000.0]  # Triple-frequency end signal
+        # Validate Barker length
+        if self.barker_length not in (7, 11, 13):
+            raise ValueError("barker_length must be 7, 11, or 13")
 
 
 class FSKModulator:
@@ -148,47 +168,201 @@ class FSKModulator:
         num_samples = int(self.config.sample_rate * duration_ms / 1000)
         return np.zeros(num_samples, dtype=np.float32)
     
-    def generate_start_signal(self) -> np.ndarray:
-        """Generate the distinctive start signal using multiple simultaneous frequencies."""
-        duration_ms = self.config.signal_duration_ms
+    def _generate_chirp(
+        self,
+        start_freq: float,
+        end_freq: float,
+        duration_ms: float,
+        chirp_type: str = "linear"
+    ) -> np.ndarray:
+        """
+        Generate a chirp (frequency sweep) signal for enhanced detection.
+        
+        Chirps provide excellent interference resilience due to:
+        - Spread energy across time and frequency
+        - Matched filter correlation gives processing gain
+        - Robust to narrowband interference
+        
+        Args:
+            start_freq: Starting frequency in Hz
+            end_freq: Ending frequency in Hz
+            duration_ms: Duration in milliseconds
+            chirp_type: "linear" or "logarithmic"
+            
+        Returns:
+            Audio samples as numpy array
+        """
         num_samples = int(self.config.sample_rate * duration_ms / 1000)
         t = np.linspace(0, duration_ms / 1000, num_samples, endpoint=False)
         
-        # Generate multiple simultaneous tones for better detection
-        signal = np.zeros(num_samples, dtype=np.float32)
-        for freq in self.config.start_frequencies:
-            tone = np.sin(2 * np.pi * freq * t)
-            signal += tone
+        if chirp_type == "linear":
+            # Linear chirp: f(t) = f0 + (f1-f0)*t/T
+            # Phase integral: φ(t) = 2π * (f0*t + 0.5*k*t²)
+            k = (end_freq - start_freq) / (duration_ms / 1000)
+            phase = 2 * np.pi * (start_freq * t + 0.5 * k * t**2)
+        elif chirp_type == "logarithmic":
+            # Logarithmic chirp: better for wide frequency spans
+            ratio = end_freq / start_freq
+            k = ratio ** (1.0 / (duration_ms / 1000))
+            phase = 2 * np.pi * start_freq * (k**t - 1) / np.log(k)
+        else:
+            # Default to linear
+            k = (end_freq - start_freq) / (duration_ms / 1000)
+            phase = 2 * np.pi * (start_freq * t + 0.5 * k * t**2)
         
-        # Normalize by number of frequencies and apply volume
-        signal = (signal / len(self.config.start_frequencies)) * self.config.volume
+        signal = np.sin(phase, dtype=np.float64) * self.config.volume
         
-        # Apply envelope to reduce clicks
-        envelope = np.sin(np.pi * t / (duration_ms / 1000)) ** 0.5
-        signal *= envelope
+        # Apply smooth envelope to reduce spectral splatter
+        # Use raised-cosine envelope for clean edges
+        envelope = np.sin(np.pi * t / (duration_ms / 1000)) ** 0.4
+        signal = signal * envelope
         
         return signal.astype(np.float32)
     
-    def generate_end_signal(self) -> np.ndarray:
-        """Generate the distinctive end signal using multiple simultaneous frequencies."""
-        duration_ms = self.config.signal_duration_ms
+    def _generate_barker_signal(
+        self,
+        carrier_freq: float,
+        code_length: int = 13,
+        chip_duration_ms: float = 8.0
+    ) -> np.ndarray:
+        """
+        Generate BPSK-modulated Barker code signal for precise synchronization.
+        
+        Barker codes have optimal autocorrelation properties:
+        - Sharp correlation peak
+        - Minimal sidelobes (peak:sidelobe = N:1)
+        - Used in WiFi, radar, and professional communications
+        
+        Args:
+            carrier_freq: Carrier frequency for BPSK modulation
+            code_length: Barker code length (7, 11, or 13)
+            chip_duration_ms: Duration of each chip in milliseconds
+            
+        Returns:
+            Audio samples as numpy array
+        """
+        if code_length not in BARKER_CODES:
+            code_length = 13  # Default to longest code
+        
+        code = BARKER_CODES[code_length]
+        chip_samples = int(self.config.sample_rate * chip_duration_ms / 1000)
+        total_samples = chip_samples * len(code)
+        
+        signal = np.zeros(total_samples, dtype=np.float64)
+        t_chip = np.linspace(0, chip_duration_ms / 1000, chip_samples, endpoint=False)
+        
+        for i, chip in enumerate(code):
+            start = i * chip_samples
+            end = start + chip_samples
+            # BPSK: phase = 0 for +1, phase = π for -1
+            phase = 0.0 if chip == 1 else np.pi
+            signal[start:end] = np.sin(2 * np.pi * carrier_freq * t_chip + phase)
+        
+        # Apply gentle overall envelope
+        t_total = np.linspace(0, 1, total_samples, endpoint=False)
+        envelope = np.sin(np.pi * t_total) ** 0.3
+        signal = signal * envelope * self.config.volume
+        
+        return signal.astype(np.float32)
+    
+    def generate_start_signal(self) -> np.ndarray:
+        """
+        Generate the distinctive start signal.
+        
+        Uses chirp + multi-tone combination for maximum interference resilience:
+        1. Rising chirp (sweep from low to high frequency)
+        2. Multi-tone burst (legacy detection compatibility)
+        3. Optional Barker preamble for precise sync
+        """
+        samples = []
+        
+        if self.config.use_chirp_signals:
+            # Part 1: Rising chirp for robust detection
+            chirp_duration = self.config.signal_duration_ms * 0.5
+            chirp = self._generate_chirp(
+                self.config.chirp_start_freq,
+                self.config.chirp_end_freq,
+                chirp_duration,
+                chirp_type="linear"
+            )
+            samples.append(chirp)
+            
+            # Short silence between chirp and multi-tone
+            samples.append(self._generate_silence(10.0))
+        
+        # Part 2: Multi-tone burst (original approach for backward compatibility)
+        duration_ms = self.config.signal_duration_ms * (0.4 if self.config.use_chirp_signals else 1.0)
         num_samples = int(self.config.sample_rate * duration_ms / 1000)
         t = np.linspace(0, duration_ms / 1000, num_samples, endpoint=False)
         
-        # Generate multiple simultaneous tones for better detection
-        signal = np.zeros(num_samples, dtype=np.float32)
+        multi_tone = np.zeros(num_samples, dtype=np.float32)
+        for freq in self.config.start_frequencies:
+            tone = np.sin(2 * np.pi * freq * t)
+            multi_tone += tone
+        
+        # Normalize and apply volume
+        multi_tone = (multi_tone / len(self.config.start_frequencies)) * self.config.volume
+        
+        # Apply envelope
+        envelope = np.sin(np.pi * t / (duration_ms / 1000)) ** 0.5
+        multi_tone = (multi_tone * envelope).astype(np.float32)
+        samples.append(multi_tone)
+        
+        # Part 3: Optional Barker preamble for precise timing
+        if self.config.use_barker_preamble:
+            samples.append(self._generate_silence(5.0))
+            barker = self._generate_barker_signal(
+                self.config.barker_carrier_freq,
+                self.config.barker_length,
+                self.config.barker_chip_duration_ms
+            )
+            samples.append(barker)
+        
+        return np.concatenate(samples)
+    
+    def generate_end_signal(self) -> np.ndarray:
+        """
+        Generate the distinctive end signal.
+        
+        Uses falling chirp + multi-tone for easy differentiation from start:
+        1. Falling chirp (sweep from high to low frequency)
+        2. Multi-tone burst (different frequencies from start)
+        """
+        samples = []
+        
+        if self.config.use_chirp_signals:
+            # Part 1: Falling chirp (reverse of start signal)
+            chirp_duration = self.config.signal_duration_ms * 0.5
+            chirp = self._generate_chirp(
+                self.config.chirp_end_freq,  # Start high
+                self.config.chirp_start_freq,  # End low
+                chirp_duration,
+                chirp_type="linear"
+            )
+            samples.append(chirp)
+            
+            # Short silence
+            samples.append(self._generate_silence(10.0))
+        
+        # Part 2: Multi-tone burst
+        duration_ms = self.config.signal_duration_ms * (0.4 if self.config.use_chirp_signals else 1.0)
+        num_samples = int(self.config.sample_rate * duration_ms / 1000)
+        t = np.linspace(0, duration_ms / 1000, num_samples, endpoint=False)
+        
+        multi_tone = np.zeros(num_samples, dtype=np.float32)
         for freq in self.config.end_frequencies:
             tone = np.sin(2 * np.pi * freq * t)
-            signal += tone
+            multi_tone += tone
         
-        # Normalize by number of frequencies and apply volume
-        signal = (signal / len(self.config.end_frequencies)) * self.config.volume
+        # Normalize and apply volume
+        multi_tone = (multi_tone / len(self.config.end_frequencies)) * self.config.volume
         
-        # Apply envelope to reduce clicks
+        # Apply envelope
         envelope = np.sin(np.pi * t / (duration_ms / 1000)) ** 0.5
-        signal *= envelope
+        multi_tone = (multi_tone * envelope).astype(np.float32)
+        samples.append(multi_tone)
         
-        return signal.astype(np.float32)
+        return np.concatenate(samples)
     
     def encode_byte(self, byte: int) -> np.ndarray:
         """
@@ -561,13 +735,207 @@ class FSKDemodulator:
         magnitude = np.sqrt(real * real + imag * imag)
         return float(magnitude)
     
+    def _generate_reference_chirp(
+        self,
+        start_freq: float,
+        end_freq: float,
+        duration_ms: float
+    ) -> np.ndarray:
+        """Generate reference chirp for matched filter detection."""
+        num_samples = int(self.config.sample_rate * duration_ms / 1000)
+        t = np.linspace(0, duration_ms / 1000, num_samples, endpoint=False)
+        
+        k = (end_freq - start_freq) / (duration_ms / 1000)
+        phase = 2 * np.pi * (start_freq * t + 0.5 * k * t**2)
+        signal = np.sin(phase, dtype=np.float64)
+        
+        # Apply same envelope as transmitter
+        envelope = np.sin(np.pi * t / (duration_ms / 1000)) ** 0.4
+        return (signal * envelope).astype(np.float32)
+    
+    def _detect_chirp(
+        self,
+        samples: np.ndarray,
+        start_freq: float,
+        end_freq: float,
+        duration_ms: float,
+        threshold: float = 0.25
+    ) -> Tuple[bool, int, float]:
+        """
+        Detect chirp signal using matched filter (cross-correlation).
+        
+        Matched filtering provides significant processing gain:
+        - Spreads detection across time-bandwidth product
+        - Can detect signals well below noise floor
+        - Used in radar and professional communications
+        
+        Args:
+            samples: Audio samples to search
+            start_freq: Chirp starting frequency
+            end_freq: Chirp ending frequency
+            duration_ms: Chirp duration
+            threshold: Detection threshold for normalized correlation
+            
+        Returns:
+            Tuple of (detected, sample_position, correlation_peak)
+        """
+        reference = self._generate_reference_chirp(start_freq, end_freq, duration_ms)
+        
+        if len(samples) < len(reference):
+            return False, 0, 0.0
+        
+        # Matched filter = cross-correlation
+        # Using 'valid' mode gives positions where full correlation is possible
+        correlation = np.correlate(samples.astype(np.float64), reference.astype(np.float64), mode='valid')
+        correlation = np.abs(correlation)
+        
+        # Normalize by reference energy and local signal energy
+        ref_energy = np.sqrt(np.sum(reference.astype(np.float64) ** 2))
+        
+        # Calculate local signal energy using a sliding window
+        sig_energy_squared = np.convolve(
+            samples.astype(np.float64) ** 2, 
+            np.ones(len(reference)), 
+            mode='valid'
+        )
+        sig_energy = np.sqrt(np.maximum(sig_energy_squared, 1e-10))
+        
+        # Normalized correlation
+        normalized_corr = correlation / (ref_energy * sig_energy)
+        
+        peak_idx = np.argmax(normalized_corr)
+        peak_value = float(normalized_corr[peak_idx])
+        
+        detected = peak_value > threshold
+        # Return position at end of chirp
+        return detected, peak_idx + len(reference), peak_value
+    
+    def _generate_reference_barker(
+        self,
+        carrier_freq: float,
+        code_length: int,
+        chip_duration_ms: float
+    ) -> np.ndarray:
+        """Generate reference Barker signal for matched filter detection."""
+        if code_length not in BARKER_CODES:
+            code_length = 13
+        
+        code = BARKER_CODES[code_length]
+        chip_samples = int(self.config.sample_rate * chip_duration_ms / 1000)
+        total_samples = chip_samples * len(code)
+        
+        signal = np.zeros(total_samples, dtype=np.float64)
+        t_chip = np.linspace(0, chip_duration_ms / 1000, chip_samples, endpoint=False)
+        
+        for i, chip in enumerate(code):
+            start = i * chip_samples
+            end = start + chip_samples
+            phase = 0.0 if chip == 1 else np.pi
+            signal[start:end] = np.sin(2 * np.pi * carrier_freq * t_chip + phase)
+        
+        # Apply envelope
+        t_total = np.linspace(0, 1, total_samples, endpoint=False)
+        envelope = np.sin(np.pi * t_total) ** 0.3
+        
+        return (signal * envelope).astype(np.float32)
+    
+    def _detect_barker(
+        self,
+        samples: np.ndarray,
+        carrier_freq: float,
+        code_length: int,
+        chip_duration_ms: float,
+        threshold: float = 0.4
+    ) -> Tuple[bool, int, float]:
+        """
+        Detect Barker-coded signal using matched filter.
+        
+        Barker codes have optimal autocorrelation properties,
+        giving a peak:sidelobe ratio of N:1 where N is code length.
+        
+        Args:
+            samples: Audio samples to search
+            carrier_freq: Carrier frequency
+            code_length: Barker code length (7, 11, or 13)
+            chip_duration_ms: Duration of each chip
+            threshold: Detection threshold
+            
+        Returns:
+            Tuple of (detected, sample_position, correlation_peak)
+        """
+        reference = self._generate_reference_barker(carrier_freq, code_length, chip_duration_ms)
+        
+        if len(samples) < len(reference):
+            return False, 0, 0.0
+        
+        # Matched filter correlation
+        correlation = np.correlate(samples.astype(np.float64), reference.astype(np.float64), mode='valid')
+        correlation = np.abs(correlation)
+        
+        # Normalize
+        ref_energy = np.sqrt(np.sum(reference.astype(np.float64) ** 2))
+        sig_energy_squared = np.convolve(
+            samples.astype(np.float64) ** 2, 
+            np.ones(len(reference)), 
+            mode='valid'
+        )
+        sig_energy = np.sqrt(np.maximum(sig_energy_squared, 1e-10))
+        
+        normalized_corr = correlation / (ref_energy * sig_energy)
+        
+        peak_idx = np.argmax(normalized_corr)
+        peak_value = float(normalized_corr[peak_idx])
+        
+        detected = peak_value > threshold
+        return detected, peak_idx + len(reference), peak_value
+    
+    def _measure_noise_floor(
+        self,
+        samples: np.ndarray,
+        window_ms: float = 50.0,
+        percentile: float = 25.0
+    ) -> float:
+        """
+        Estimate noise floor for adaptive thresholding.
+        
+        Uses percentile of windowed RMS values to estimate background noise.
+        This allows detection thresholds to adapt to noisy environments.
+        
+        Args:
+            samples: Audio samples
+            window_ms: Analysis window size in milliseconds
+            percentile: Percentile to use for noise estimate (lower = more conservative)
+            
+        Returns:
+            Estimated noise floor (RMS value)
+        """
+        window_size = int(self.config.sample_rate * window_ms / 1000)
+        if len(samples) < window_size:
+            return np.sqrt(np.mean(samples ** 2))
+        
+        rms_values = []
+        for i in range(0, len(samples) - window_size, window_size // 2):
+            window = samples[i:i + window_size]
+            rms = np.sqrt(np.mean(window ** 2))
+            rms_values.append(rms)
+        
+        if not rms_values:
+            return 0.01
+        
+        return float(np.percentile(rms_values, percentile))
+    
     def detect_start_signal(
         self,
         samples: np.ndarray,
-        threshold: float = 0.12,  # Lower threshold for better detection
+        threshold: float = 0.12,
     ) -> Tuple[bool, int]:
         """
-        Detect the start signal in audio using multiple simultaneous frequencies.
+        Detect the start signal using enhanced multi-method detection.
+        
+        Detection strategy:
+        1. If chirp signals enabled: Use matched filter correlation (most robust)
+        2. Fallback to multi-tone detection for backward compatibility
+        3. Optional Barker code detection for precise sync
         
         Args:
             samples: Audio samples
@@ -576,6 +944,33 @@ class FSKDemodulator:
         Returns:
             Tuple of (detected, sample_position)
         """
+        # Adaptive threshold based on noise floor
+        noise_floor = self._measure_noise_floor(samples[:min(len(samples), self.config.sample_rate)])
+        adaptive_threshold = max(threshold, noise_floor * 2.5)
+        
+        # Method 1: Chirp detection (if enabled) - most robust
+        if self.config.use_chirp_signals:
+            chirp_duration = self.config.signal_duration_ms * 0.5
+            detected, pos, peak = self._detect_chirp(
+                samples,
+                self.config.chirp_start_freq,
+                self.config.chirp_end_freq,
+                chirp_duration,
+                threshold=0.25  # Chirp detection uses its own threshold
+            )
+            if detected:
+                # Account for silence + multi-tone that follows chirp
+                multi_tone_duration = self.config.signal_duration_ms * 0.4
+                extra_samples = int(self.config.sample_rate * (10.0 + multi_tone_duration) / 1000)
+                
+                # If Barker preamble is used, add that too
+                if self.config.use_barker_preamble:
+                    barker_duration = self.config.barker_chip_duration_ms * self.config.barker_length
+                    extra_samples += int(self.config.sample_rate * (5.0 + barker_duration) / 1000)
+                
+                return True, pos + extra_samples
+        
+        # Method 2: Multi-tone detection (fallback / backward compatibility)
         window_size = int(
             self.config.sample_rate * self.config.signal_duration_ms / 1000
         )
@@ -602,8 +997,8 @@ class FSKDemodulator:
                 normalized_mag = magnitude / (len(window) * window_rms) if window_rms > 1e-10 else 0.0
                 magnitudes.append(normalized_mag)
                 
-                # Check if this frequency is present (lower threshold for multi-freq)
-                if normalized_mag > threshold:
+                # Check if this frequency is present (use adaptive threshold)
+                if normalized_mag > adaptive_threshold:
                     detection_count += 1
             
             # Require simple majority of configured start frequencies
@@ -616,10 +1011,12 @@ class FSKDemodulator:
     def detect_end_signal(
         self,
         samples: np.ndarray,
-        threshold: float = 0.12,  # Lower threshold for better detection
+        threshold: float = 0.12,
     ) -> Tuple[bool, int]:
         """
-        Detect the end signal in audio using multiple simultaneous frequencies.
+        Detect the end signal using enhanced multi-method detection.
+        
+        Uses falling chirp (if enabled) + multi-tone for differentiation from start.
         
         Args:
             samples: Audio samples
@@ -628,12 +1025,33 @@ class FSKDemodulator:
         Returns:
             Tuple of (detected, sample_position)
         """
+        # Adaptive threshold based on noise floor
+        noise_floor = self._measure_noise_floor(samples[:min(len(samples), self.config.sample_rate // 2)])
+        adaptive_threshold = max(threshold, noise_floor * 2.5)
+        
+        # Method 1: Chirp detection (if enabled) - falling chirp for end signal
+        if self.config.use_chirp_signals:
+            chirp_duration = self.config.signal_duration_ms * 0.5
+            # End signal uses REVERSE chirp (high to low)
+            detected, pos, peak = self._detect_chirp(
+                samples,
+                self.config.chirp_end_freq,    # Start high
+                self.config.chirp_start_freq,  # End low
+                chirp_duration,
+                threshold=0.25
+            )
+            if detected:
+                # Position should be at start of end signal (before chirp)
+                chirp_samples = int(self.config.sample_rate * chirp_duration / 1000)
+                return True, max(0, pos - chirp_samples)
+        
+        # Method 2: Multi-tone detection (fallback)
         window_size = int(
             self.config.sample_rate * self.config.signal_duration_ms / 1000
         )
         step_size = window_size // 4
         
-        # Make sure we don't go past the end - adjust loop to include the last possible window
+        # Make sure we don't go past the end
         max_start = len(samples) - window_size
         if max_start < 0:
             return False, len(samples)
@@ -669,8 +1087,8 @@ class FSKDemodulator:
                 normalized_mag = magnitude / (len(window) * window_rms) if window_rms > 1e-10 else 0.0
                 magnitudes.append(normalized_mag)
                 
-                # Check if this frequency is present (lower threshold for multi-freq)
-                if normalized_mag > threshold:
+                # Check if this frequency is present (use adaptive threshold)
+                if normalized_mag > adaptive_threshold:
                     detection_count += 1
             
             # Require simple majority of configured end frequencies

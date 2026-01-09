@@ -1,7 +1,7 @@
 # Performance and Accuracy Improvements
 
 > [!NOTE]
-> This document describes the comprehensive performance, precision, and accuracy improvements made to the muwave encoding and decoding system in version 0.1.3.
+> This document describes the comprehensive performance, precision, and accuracy improvements made to the muwave encoding and decoding system in version 0.1.4.
 
 ## Overview
 This document describes the comprehensive performance, precision, and accuracy improvements made to the muwave encoding and decoding system.

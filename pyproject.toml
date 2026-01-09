@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muwave"
-version = "0.1.3"
+version = "0.1.4"
 description = "Sound-based communication protocol for AI agents, compatible with Linux and macOS"
 readme = "INFO/README.md"
 license = {text = "MIT"}

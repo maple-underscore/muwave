@@ -3,7 +3,7 @@ muwave - Sound-based communication protocol for AI agents
 Compatible with Linux and macOS
 """
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 __author__ = "muwave contributors"
 
 from muwave.core.config import Config

@@ -529,7 +529,7 @@ class MuwaveApp:
 
 
 @click.group()
-@click.version_option(version="0.1.3")
+@click.version_option(version="0.1.4")
 def main():
     """muwave - Sound-based communication protocol for AI agents."""
     pass

@@ -1,7 +1,7 @@
 # Anti-Interference Improvements for Fast Symbol Rates
 
 > [!NOTE]
-> Version 0.1.3 introduces comprehensive anti-interference measures that reduce harmonic distortion by up to 80%, resulting in 75% improvement in spectral purity.
+> Version 0.1.4 introduces comprehensive anti-interference measures that reduce harmonic distortion by up to 80%, resulting in 75% improvement in spectral purity.
 
 ## Problem Analysis
 

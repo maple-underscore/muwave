@@ -12,7 +12,7 @@ def test_start_end_signal_detection_with_config_frequencies():
     demod = FSKDemodulator(fsk_cfg)
 
     data = b"ok"
-    samples = mod.encode_data(data)
+    samples, _ = mod.encode_data(data)
 
     detected, start_pos = demod.detect_start_signal(samples)
     assert detected, "Start signal should be detected"
