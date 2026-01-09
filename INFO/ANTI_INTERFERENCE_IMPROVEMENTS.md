@@ -134,6 +134,8 @@ return signal.astype(np.float32)  # Convert only at output
 > The green-blue interference bands visible in spectrograms are reduced by 70-90% across all frequency ranges, resulting in much cleaner audio signatures.
 
 ### Before Improvements
+<img width="1886" height="1009" alt="image" src="https://github.com/user-attachments/assets/8a079cd3-924a-4686-93c8-71b53497d8e2" />
+
 ```
 Frequency Range | Energy | Comment
 0-4 kHz        | High   | Desired signal (RED in spectrogram)
@@ -143,6 +145,8 @@ Frequency Range | Energy | Comment
 ```
 
 ### After Improvements
+<img width="1885" height="1006" alt="image" src="https://github.com/user-attachments/assets/04227dff-b859-4fd9-a5e1-50c71c1392a9" />
+
 ```
 Frequency Range | Energy | Improvement
 0-4 kHz        | High   | Unchanged (desired signal)
