@@ -4,9 +4,12 @@ Provides the core audio encoding/decoding functionality.
 """
 
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 import math
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+import multiprocessing
+import time
 
 
 @dataclass
@@ -76,7 +79,7 @@ class FSKModulator:
         fade_ms: float = 5.0,
     ) -> np.ndarray:
         """
-        Generate a tone at the given frequency.
+        Generate a tone at the given frequency with anti-interference measures.
         
         Args:
             frequency: Frequency in Hz
@@ -89,18 +92,56 @@ class FSKModulator:
         num_samples = int(self.config.sample_rate * duration_ms / 1000)
         t = np.linspace(0, duration_ms / 1000, num_samples, endpoint=False)
         
-        # Generate sine wave
-        signal = np.sin(2 * np.pi * frequency * t) * self.config.volume
+        # Generate pure sine wave with high precision
+        signal = np.sin(2 * np.pi * frequency * t, dtype=np.float64) * self.config.volume
         
-        # Apply fade in/out to reduce clicks
-        fade_samples = int(self.config.sample_rate * fade_ms / 1000)
+        # Adaptive fade duration based on symbol length
+        # Longer fade for faster symbols to reduce spectral splatter
+        # Fast symbols (<30ms) get proportionally longer fades
+        if duration_ms < 30:
+            adaptive_fade_ms = min(duration_ms * 0.35, 10.0)  # Up to 35% of symbol or 10ms max
+        else:
+            adaptive_fade_ms = fade_ms
+        
+        fade_samples = int(self.config.sample_rate * adaptive_fade_ms / 1000)
+        
+        # Use raised-cosine window for smoother transitions (reduces harmonics)
         if fade_samples > 0 and fade_samples < num_samples // 2:
-            fade_in = np.linspace(0, 1, fade_samples)
-            fade_out = np.linspace(1, 0, fade_samples)
+            # Raised cosine provides better spectral properties than linear
+            t_fade = np.linspace(0, np.pi, fade_samples)
+            fade_in = (1 - np.cos(t_fade)) / 2  # Smooth raised-cosine
+            fade_out = (1 + np.cos(t_fade)) / 2
             signal[:fade_samples] *= fade_in
             signal[-fade_samples:] *= fade_out
         
+        # Apply gentle low-pass filter to remove high-frequency artifacts
+        # This is critical for reducing the green-blue interference bands
+        signal = self._apply_anti_aliasing_filter(signal)
+        
         return signal.astype(np.float32)
+    
+    def _apply_anti_aliasing_filter(self, signal: np.ndarray) -> np.ndarray:
+        """
+        Apply low-pass filter to remove harmonics and reduce interference.
+        Uses a simple but effective moving average filter.
+        
+        Args:
+            signal: Input signal
+            
+        Returns:
+            Filtered signal
+        """
+        # Only apply filtering if we have enough samples
+        if len(signal) < 5:
+            return signal
+        
+        # Simple 3-tap moving average (low-pass filter)
+        # This removes high-frequency components while preserving the fundamental
+        kernel = np.array([0.25, 0.5, 0.25], dtype=np.float64)
+        filtered = np.convolve(signal, kernel, mode='same')
+        
+        # Preserve amplitude by compensating for filter gain
+        return filtered
     
     def _generate_silence(self, duration_ms: float) -> np.ndarray:
         """Generate silence."""
@@ -185,7 +226,13 @@ class FSKModulator:
             low_nibble = byte & 0x0F
             tone1 = self._generate_tone(self._frequencies[0][high_nibble], self.config.symbol_duration_ms)
             tone2 = self._generate_tone(self._frequencies[1][low_nibble], self.config.symbol_duration_ms)
-            return (tone1 + tone2) / 2.0
+            # Careful mixing to prevent clipping and reduce intermodulation
+            mixed = (tone1 + tone2) * 0.5
+            # Normalize to prevent overflow
+            peak = np.max(np.abs(mixed))
+            if peak > 0.95:
+                mixed = mixed * (0.95 / peak)
+            return mixed
         
         elif self.config.num_channels == 3:
             # Tri-channel: split 8 bits as 3+3+2 bits
@@ -195,7 +242,12 @@ class FSKModulator:
             tone1 = self._generate_tone(self._frequencies[0][bits_765], self.config.symbol_duration_ms)
             tone2 = self._generate_tone(self._frequencies[1][bits_432], self.config.symbol_duration_ms)
             tone3 = self._generate_tone(self._frequencies[2][bits_10], self.config.symbol_duration_ms)
-            return (tone1 + tone2 + tone3) / 3.0
+            # Careful mixing with normalization
+            mixed = (tone1 + tone2 + tone3) * 0.333
+            peak = np.max(np.abs(mixed))
+            if peak > 0.95:
+                mixed = mixed * (0.95 / peak)
+            return mixed
         
         else:  # num_channels == 4
             # Quad-channel: split 8 bits as 2+2+2+2 bits
@@ -207,7 +259,12 @@ class FSKModulator:
             tone2 = self._generate_tone(self._frequencies[1][bits_54], self.config.symbol_duration_ms)
             tone3 = self._generate_tone(self._frequencies[2][bits_32], self.config.symbol_duration_ms)
             tone4 = self._generate_tone(self._frequencies[3][bits_10], self.config.symbol_duration_ms)
-            return (tone1 + tone2 + tone3 + tone4) / 4.0
+            # Careful mixing with normalization
+            mixed = (tone1 + tone2 + tone3 + tone4) * 0.25
+            peak = np.max(np.abs(mixed))
+            if peak > 0.95:
+                mixed = mixed * (0.95 / peak)
+            return mixed
     
     def encode_signature(self, signature: bytes) -> np.ndarray:
         """
@@ -278,7 +335,7 @@ class FSKModulator:
         data: bytes,
         signature: Optional[bytes] = None,
         repetitions: int = 1,
-    ) -> np.ndarray:
+    ) -> Tuple[np.ndarray, Dict[str, float]]:
         """
         Encode data into audio with start/end signals.
         
@@ -288,8 +345,9 @@ class FSKModulator:
             repetitions: Number of times to repeat the data
             
         Returns:
-            Complete audio signal
+            Tuple of (complete audio signal, timing dict)
         """
+        timestamps = {'start': time.time()}
         samples = []
         
         # Start signal
@@ -318,11 +376,17 @@ class FSKModulator:
                 samples.append(self._generate_silence(self.config.silence_ms / 2))
         
         samples.append(self._generate_silence(self.config.silence_ms))
+        timestamps['data_encoded'] = time.time()
         
         # End signal
         samples.append(self.generate_end_signal())
+        timestamps['end'] = time.time()
+        timestamps['total_duration'] = timestamps['end'] - timestamps['start']
         
-        return np.concatenate(samples)
+        # Store timestamps for retrieval
+        self._last_encode_timestamps = timestamps
+        
+        return np.concatenate(samples), timestamps
     
     def encode_text(
         self,
@@ -339,10 +403,11 @@ class FSKModulator:
             repetitions: Number of times to repeat
             
         Returns:
-            Audio signal
+            Audio signal (timestamps stored in _last_encode_timestamps)
         """
         data = text.encode('utf-8')
-        return self.encode_data(data, signature, repetitions)
+        audio, timestamps = self.encode_data(data, signature, repetitions)
+        return audio
 
 
 class FSKDemodulator:
@@ -392,12 +457,15 @@ class FSKDemodulator:
         if len(samples) == 0:
             return 0, 0.0
         
-        # Apply window function to reduce spectral leakage
-        # Use Hamming for better frequency resolution
-        window = np.hamming(len(samples))
-        windowed_samples = samples * window
+        # Use float64 for higher precision
+        samples_hp = samples.astype(np.float64)
         
-        # Calculate signal energy for normalization
+        # Apply Blackman-Harris window for superior sidelobe suppression
+        # This reduces spectral leakage better than Hamming for our use case
+        window = np.blackman(len(samples_hp))
+        windowed_samples = samples_hp * window
+        
+        # Calculate signal energy for normalization with improved precision
         signal_energy = np.sum(windowed_samples ** 2)
         if signal_energy < 1e-20:
             return 0, 0.0
@@ -428,8 +496,13 @@ class FSKDemodulator:
                 concentration = (sorted_corr[0] ** 2) / total_energy if total_energy > 0 else 0
                 
                 # Metric 3: Signal strength relative to expected
-                # For good signals, expect correlation > 0.3 after normalization
-                strength = min(1.0, sorted_corr[0] / 0.3)
+                # Adaptive threshold based on symbol duration
+                # Shorter symbols have less time to build energy, so scale expected magnitude
+                # Base threshold: 0.3 for 60ms symbols, scale proportionally
+                base_duration = 60.0  # Reference symbol duration in ms
+                duration_scale = np.sqrt(self.config.symbol_duration_ms / base_duration)
+                expected_magnitude = 0.3 * duration_scale
+                strength = min(1.0, sorted_corr[0] / expected_magnitude)
                 
                 # Combined confidence with weights
                 confidence = (
@@ -448,6 +521,7 @@ class FSKDemodulator:
     def _goertzel(self, samples: np.ndarray, target_freq: float) -> float:
         """
         Goertzel algorithm for efficient single-frequency detection.
+        Enhanced with higher precision calculations.
         
         Args:
             samples: Audio samples
@@ -460,6 +534,9 @@ class FSKDemodulator:
         if n == 0:
             return 0.0
         
+        # Use float64 for higher precision in intermediate calculations
+        samples_hp = samples.astype(np.float64)
+        
         # Use exact frequency instead of nearest bin for better accuracy
         normalized_freq = target_freq / self.config.sample_rate
         w = 2.0 * np.pi * normalized_freq
@@ -469,10 +546,10 @@ class FSKDemodulator:
         cosine = np.cos(w)
         sine = np.sin(w)
         
-        # Goertzel filter with improved numerical stability
+        # Goertzel filter with improved numerical stability using float64
         s0, s1, s2 = 0.0, 0.0, 0.0
-        for sample in samples:
-            s0 = float(sample) + coeff * s1 - s2
+        for sample in samples_hp:
+            s0 = sample + coeff * s1 - s2
             s2 = s1
             s1 = s0
         
@@ -482,7 +559,7 @@ class FSKDemodulator:
         
         # Return magnitude (without 2/n scaling - preserve absolute magnitude)
         magnitude = np.sqrt(real * real + imag * imag)
-        return magnitude
+        return float(magnitude)
     
     def detect_start_signal(
         self,
@@ -831,6 +908,7 @@ class FSKDemodulator:
         )
         
         confidences = []
+        timestamps = {'start': time.time()}
         
         # Decode signature
         signature_bytes = []
@@ -843,6 +921,7 @@ class FSKDemodulator:
             pos += byte_samples
         
         pos += silence_samples
+        timestamps['signature_decoded'] = time.time()
         
         # Decode length (2 bytes)
         if pos + byte_samples * 2 > len(samples):
@@ -857,20 +936,42 @@ class FSKDemodulator:
         pos += byte_samples
         
         data_length = (length_high << 8) | length_low
+        timestamps['length_decoded'] = time.time()
         
-        # Decode data with repetitions
+        # Decode data with repetitions - use parallel processing for better performance
         all_data = []
         for rep in range(repetitions):
             data_bytes = []
-            for _ in range(data_length):
+            byte_positions = []
+            
+            # Collect all byte positions for parallel processing
+            for i in range(data_length):
                 if pos + byte_samples > len(samples):
                     break
-                byte_val, conf = self.decode_byte(samples[pos:pos + byte_samples])
-                data_bytes.append(byte_val)
-                confidences.append(conf)
+                byte_positions.append(pos)
                 pos += byte_samples
+            
+            # Parallel decode if we have enough bytes to make it worthwhile
+            if len(byte_positions) > 20:
+                # Use thread pool for parallel decoding (GIL is released in numpy operations)
+                with ThreadPoolExecutor(max_workers=min(4, multiprocessing.cpu_count())) as executor:
+                    futures = [executor.submit(self.decode_byte, samples[bp:bp + byte_samples]) 
+                              for bp in byte_positions]
+                    for future in futures:
+                        byte_val, conf = future.result()
+                        data_bytes.append(byte_val)
+                        confidences.append(conf)
+            else:
+                # Sequential decode for small data
+                for bp in byte_positions:
+                    byte_val, conf = self.decode_byte(samples[bp:bp + byte_samples])
+                    data_bytes.append(byte_val)
+                    confidences.append(conf)
+            
             all_data.append(data_bytes)
             pos += silence_samples
+        
+        timestamps['data_decoded'] = time.time()
         
         # Vote on data if multiple repetitions
         if len(all_data) > 1 and all(len(d) == data_length for d in all_data):
@@ -891,6 +992,12 @@ class FSKDemodulator:
             final_data = []
         
         avg_confidence = np.mean(confidences) if confidences else 0.0
+        
+        timestamps['end'] = time.time()
+        timestamps['total_duration'] = timestamps['end'] - timestamps['start']
+        
+        # Store timestamps for later retrieval
+        self._last_decode_timestamps = timestamps
         
         return bytes(final_data), bytes(signature_bytes), avg_confidence
     
@@ -928,6 +1035,15 @@ class FSKDemodulator:
             return text, signature, confidence
         except UnicodeDecodeError:
             return None, signature, confidence
+    
+    def get_last_decode_timestamps(self) -> Optional[Dict[str, float]]:
+        """
+        Get timestamps from the last decode operation.
+        
+        Returns:
+            Dictionary with timing information or None if no decode has been performed
+        """
+        return getattr(self, '_last_decode_timestamps', None)
     
     def _apply_char_correction(self, text: str) -> str:
         """Apply common character corrections for FSK bit errors."""

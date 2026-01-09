@@ -169,7 +169,7 @@ class Transmitter:
             self._update_progress("waiting")
             
             # Encode message (use encode_data instead of encode_text to preserve binary format info)
-            audio_samples = self._modulator.encode_data(
+            audio_samples, encode_timestamps = self._modulator.encode_data(
                 encoded_data,
                 signature=self.party.signature,
                 repetitions=self._repetitions,

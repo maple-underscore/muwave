@@ -1,7 +1,7 @@
 # Parallel Decoding Enhancement
 
-## Overview
-The decode command now supports multi-threaded speed auto-detection for improved performance.
+> [!NOTE]
+> The decode command now supports multi-threaded speed auto-detection for improved performance using all available CPU cores.
 
 ## Feature Details
 
@@ -34,6 +34,9 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
 ```
 
 ### Performance Characteristics
+
+> [!IMPORTANT]
+> When metadata is present in the audio file (modern muwave-generated files), parallel testing is automatically bypassed for faster decoding (~2.7s vs testing all speeds).
 
 #### Metadata Present (Fast Path)
 - **Behavior**: Reads metadata header, extracts symbol duration and channel count

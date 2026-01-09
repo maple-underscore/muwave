@@ -1,9 +1,12 @@
 # muwave Format Support - Implementation Summary
 
-## Overview
-Added comprehensive support for transmitting and receiving formatted content over muwave's audio protocol. The system now automatically detects and preserves formatting including Markdown, JSON, XML, YAML, HTML, and code with syntax information.
+> [!NOTE]
+> Added comprehensive support for transmitting and receiving formatted content over muwave's audio protocol. The system now automatically detects and preserves formatting including Markdown, JSON, XML, YAML, HTML, and code with syntax information.
 
 ## Features Implemented
+
+> [!TIP]
+> Use `--format auto` to let muwave automatically detect the content type, or specify the format explicitly for guaranteed correct handling.
 
 ### 1. Format Detection (`muwave/utils/formats.py`)
 - **Automatic format detection** - Analyzes content and determines format type

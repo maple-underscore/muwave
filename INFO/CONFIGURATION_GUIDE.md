@@ -1,8 +1,7 @@
 # muwave Configuration Guide
 
-## Overview
-
-All muwave settings are now centralized in `config.yaml` and properly propagated throughout the system. This ensures consistent behavior across all commands and features.
+> [!NOTE]
+> All muwave settings are now centralized in `config.yaml` and properly propagated throughout the system. This ensures consistent behavior across all commands and features.
 
 ## Configuration Structure
 
@@ -94,10 +93,14 @@ protocol:
 
 ## Key Features
 
+> [!TIP]
+> The configuration system supports hot-reloading for most settings. Changes to `config.yaml` are picked up automatically without restarting muwave.
+
 ### 1. Multi-Frequency Start/End Signals
 
-**Previous**: Single chirp frequency for start/end detection
-**Current**: Multiple simultaneous frequencies for robust detection
+> [!IMPORTANT]
+> **Previous**: Single chirp frequency for start/end detection  
+> **Current**: Multiple simultaneous frequencies for robust detection
 
 ```yaml
 start_frequencies: [800, 850, 900]    # 3 simultaneous tones

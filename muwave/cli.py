@@ -529,7 +529,7 @@ class MuwaveApp:
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version="0.1.3")
 def main():
     """muwave - Sound-based communication protocol for AI agents."""
     pass
@@ -1070,39 +1070,46 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
                 task = progress.add_task("[cyan]Decoding message...", total=100)
                 
                 # Decode in thread to show progress
-                result = [None, None, None]
-                def decode_thread():
-                    demodulator = FSKDemodulator(fsk_config)
-                    result[0], result[1], result[2] = demodulator.decode_data(
-                        message_samples,
-                        signature_length=8,
-                        repetitions=reps,
-                        read_metadata=True,
-                    )
-                
-                thread = threading.Thread(target=decode_thread)
-                thread.start()
-                
-                while thread.is_alive():
-                    thread.join(timeout=0.05)
-                    if progress.tasks[task].percentage < 90:
-                        progress.update(task, advance=3)
-                
-                thread.join()
-                progress.update(task, completed=100)
-                data, signature, confidence = result[0], result[1], result[2]
+            result = [None, None, None, None]  # data, signature, confidence, demodulator
+            def decode_thread():
+                demodulator = FSKDemodulator(fsk_config)
+                result[0], result[1], result[2] = demodulator.decode_data(
+                    message_samples,
+                    signature_length=8,
+                    repetitions=reps,
+                    read_metadata=True,
+                )
+                result[3] = demodulator
             
-            # Decode formatted content
-            from muwave.utils.formats import FormatEncoder
-            if data:
-                text, format_meta = FormatEncoder.decode(data)
-            else:
-                text = None
-                format_meta = None
+            thread = threading.Thread(target=decode_thread)
+            thread.start()
             
-            ui.console.print()
-            ui.print_success(f"Decoded using metadata: {num_channels} channels, {symbol_dur}ms ({confidence:.2%} confidence)")
-    
+            while thread.is_alive():
+                thread.join(timeout=0.05)
+                if progress.tasks[task].percentage < 90:
+                    progress.update(task, advance=3)
+            
+            thread.join()
+            progress.update(task, completed=100)
+            data, signature, confidence, demodulator = result[0], result[1], result[2], result[3]
+        
+        # Decode formatted content
+        from muwave.utils.formats import FormatEncoder
+        if data:
+            text, format_meta = FormatEncoder.decode(data)
+        else:
+            text = None
+            format_meta = None
+        
+        ui.console.print()
+        ui.print_success(f"Decoded using metadata: {num_channels} channels, {symbol_dur}ms ({confidence:.2%} confidence)")
+        
+        # Display timing information
+        if demodulator:
+            timestamps = demodulator.get_last_decode_timestamps()
+            if timestamps:
+                total_time = timestamps.get('total_duration', 0)
+                ui.console.print(f"[dim]⏱  Decode time: {total_time:.3f}s[/dim]")
     else:
         # Use specified settings
         if speed:
@@ -1141,7 +1148,7 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
             task = progress.add_task("[cyan]Decoding message...", total=100)
             
             # Decode in thread to show progress
-            result = [None, None, None]
+            result = [None, None, None, None]  # data, signature, confidence, demodulator
             def decode_thread():
                 demodulator = FSKDemodulator(fsk_config)
                 result[0], result[1], result[2] = demodulator.decode_data(
@@ -1149,6 +1156,7 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
                     signature_length=8,
                     repetitions=reps,
                 )
+                result[3] = demodulator
             
             thread = threading.Thread(target=decode_thread)
             thread.start()
@@ -1160,7 +1168,7 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
             
             thread.join()
             progress.update(task, completed=100)
-            data, signature, confidence = result[0], result[1], result[2]
+            data, signature, confidence, demodulator = result[0], result[1], result[2], result[3]
         
         # Decode formatted content
         from muwave.utils.formats import FormatEncoder
@@ -1177,8 +1185,28 @@ def decode(input_file: str, config: Optional[str], speed: Optional[str],
             return
         
         ui.print_success(f"Decoded successfully (confidence: {confidence:.2%})")
+        
+        # Display timing information
+        if demodulator:
+            timestamps = demodulator.get_last_decode_timestamps()
+            if timestamps:
+                total_time = timestamps.get('total_duration', 0)
+                ui.console.print(f"[dim]⏱  Decode time: {total_time:.3f}s[/dim]")
     
-    if confidence < 0.5:
+    # Adaptive confidence threshold based on transmission parameters
+    # Fast symbol rates and high channel counts inherently have more interference
+    # Adjust warning threshold accordingly
+    base_threshold = 0.5
+    if symbol_dur and num_channels:
+        # Lower threshold for faster symbols (less time for clean frequency separation)
+        # Lower threshold for more channels (more inter-channel interference)
+        duration_factor = max(0.7, min(1.0, symbol_dur / 40.0))  # 40ms is baseline
+        channel_factor = max(0.7, 1.0 - (num_channels - 1) * 0.1)  # Each channel adds 10% interference
+        adaptive_threshold = base_threshold * duration_factor * channel_factor
+    else:
+        adaptive_threshold = base_threshold
+    
+    if confidence < adaptive_threshold:
         ui.print_warning(f"Low confidence ({confidence:.2%}) - decoding may be inaccurate")
     
     # Format content for display using already-decoded format metadata
@@ -1360,13 +1388,15 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
         
         # Start encoding in a separate thread to allow progress updates
         import threading
-        result = [None]
+        result = [None, None]  # audio, timestamps
         def encode_thread():
-            result[0] = modulator.encode_data(
+            audio, timestamps = modulator.encode_data(
                 encoded_data,
                 signature=party.signature,
                 repetitions=reps,
             )
+            result[0] = audio
+            result[1] = timestamps
         
         thread = threading.Thread(target=encode_thread)
         thread.start()
@@ -1380,6 +1410,13 @@ def generate(prompt: str, output: str, config: Optional[str], name: Optional[str
         thread.join()
         progress.update(task, completed=100)
         audio_samples = result[0]
+        encode_timestamps = result[1]
+    
+    # Display encoding timing
+    if encode_timestamps:
+        encode_time = encode_timestamps.get('total_duration', 0)
+        ui.console.print(f"[dim]⏱  Encode time: {encode_time:.3f}s[/dim]")
+        ui.console.print()
     
     # Get sample rate from config
     sample_rate = fsk_config.sample_rate
