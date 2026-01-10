@@ -3,7 +3,7 @@
 Sound-based communication protocol for AI agents, compatible with Linux and macOS.
 
 > [!NOTE]
-> Version 0.1.4 introduces major performance improvements including parallel decoding (up to 4x faster), timestamp tracking, float64 precision, and advanced anti-interference measures for fast symbol rates.
+> Version 0.1.5 introduces a standardized metadata header format with checksum validation, enhanced configuration options, and improved code organization. See the [Changelog](CHANGELOG.md) for full details.
 
 ## Features
 
@@ -513,7 +513,31 @@ muwave docker-start --model llama2  # Specify model
 
 ## Version History
 
-### Version 0.1.4 (Current)
+> [!TIP]
+> For a complete list of changes, see the [Changelog](CHANGELOG.md).
+
+### Version 0.1.5 (Current)
+
+> [!IMPORTANT]
+> This release introduces a standardized metadata header format for reliable cross-configuration decoding.
+
+#### Metadata Header v2
+- **Magic Bytes**: `MW` + alternating bits (`0xAA 0x55`) for reliable header detection
+- **Version Field**: Protocol version tracking for future compatibility
+- **Checksum Validation**: XOR checksum to detect corrupted headers
+- **Extended Fields**: Now includes base frequency, frequency step, channel spacing, and signature length
+
+#### Configuration Improvements
+- **Factory Method**: New `FSKConfig.from_config()` class method for cleaner instantiation
+- **Override Support**: `create_fsk_config()` accepts `base_frequency`, `frequency_step`, and `channel_spacing` overrides
+- **Better Defaults**: Uses `field()` for mutable default values (proper dataclass pattern)
+
+#### Code Quality
+- **Refactored FSK Module**: Improved organization with constants section and better documentation
+- **Type Safety**: Added `TYPE_CHECKING` guards and forward references
+- **Enhanced CLI Output**: Detailed metadata display during decode operations
+
+### Version 0.1.4
 
 > [!IMPORTANT]
 > This release focuses on performance, accuracy, and signal quality improvements.

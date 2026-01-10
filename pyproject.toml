@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "muwave"
-version = "0.1.4"
+version = "0.1.5"
 description = "Sound-based communication protocol for AI agents, compatible with Linux and macOS"
-readme = "INFO/README.md"
+readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
